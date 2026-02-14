@@ -1,13 +1,13 @@
 # Data Processing & Analysis
-pandas==2.1.4
-numpy==1.26.2
+pandas==1.5.3
+numpy==1.24.4
 scipy==1.11.4
 openpyxl==3.1.2
 
 # Machine Learning
 scikit-learn==1.3.2
 xgboost==2.0.3
-lightgbm==4.1.0
+lightgbm==4.3.0
 imbalanced-learn==0.11.0
 
 # Model Explainability
@@ -25,9 +25,9 @@ confluent-kafka==2.3.0
 kafka-python==2.0.2
 
 # API Framework
-fastapi==0.108.0
+fastapi==0.95.2
 uvicorn==0.25.0
-pydantic==2.5.3
+pydantic==1.10.13
 python-multipart==0.0.6
 
 # Dashboard & Visualization
@@ -41,7 +41,7 @@ kaggle==1.5.16
 opendatasets==0.1.22
 
 # Database (optional)
-sqlalchemy==2.0.23
+sqlalchemy==1.4.49
 
 # Utilities
 python-dotenv==1.0.0
@@ -50,7 +50,7 @@ tqdm==4.66.1
 requests==2.31.0
 
 # Email/Alerts
-python-smtp==1.0.0
+# python-smtp==1.0.0
 email-validator==2.1.0
 
 # Testing
