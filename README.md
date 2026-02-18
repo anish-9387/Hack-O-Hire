@@ -31,18 +31,11 @@ This system predicts financial stress in bank customers by analyzing transaction
 - **Data Scale**: 2.5M+ transactions, 5000 feature snapshots
 - **Timeline**: 36 months (Jan 2022 - Dec 2024)
 
-### ✅ Why 85-92% is GOOD (not 100%):
-- ✅ **Generalizes to new customers** (no overfitting)
-- ✅ **Time-based validation** (train on past, test on future)
-- ✅ **Realistic noise & edge cases** (15% label noise)
-- ✅ **5 customer stress patterns** (gradual, early, late, recovered, normal)
-- ❌ **100% = RED FLAG** (memorization, not learning)
-
 ---
 
 ## 🔄 Complete Workflow
 
-### Phase 1: Data Generation (2-3 minutes)
+### Phase 1: Data Generation
 ```bash
 python train_model_enhanced.py
 ```
@@ -68,7 +61,7 @@ python train_model_enhanced.py
 
 ---
 
-### Phase 2: Model Training (3-5 minutes)
+### Phase 2: Model Training
 
 **Option A: Jupyter Notebook (Recommended)**
 ```bash
@@ -109,7 +102,7 @@ python train_model_enhanced.py
 
 ---
 
-### Phase 3: API Deployment (30 seconds)
+### Phase 3: API Deployment
 ```bash
 python app/main.py
 ```
@@ -127,7 +120,7 @@ python app/main.py
 
 ---
 
-### Phase 4: Dashboard Launch (30 seconds)
+### Phase 4: Dashboard Launch
 ```bash
 python src/dashboard/dashboard_app.py
 ```
@@ -142,7 +135,7 @@ python src/dashboard/dashboard_app.py
 
 ---
 
-### Phase 5: Real-time Processing (Optional)
+### Phase 5: Real-time Processing
 
 **Start Kafka:**
 ```bash
@@ -359,31 +352,6 @@ pip install -r requirements.txt
 python train_model_enhanced.py
 ```
 
-**Expected output:**
-```
-[STEP 1/5] Generating realistic transactions...
-✅ Generated 2,567,791 transactions (2022-01-02 to 2024-12-15)
-
-[STEP 2/5] Engineering features...
-✅ Created 5000 feature snapshots (33 features each)
-
-[STEP 3/5] Time-based split...
-✅ Train: 3538 samples (70%) - Stress rate: 27.6%
-✅ Val:   759 samples (15%) - Stress rate: 30.4%
-✅ Test:  703 samples (15%) - Stress rate: 26.5%
-
-[STEP 4/5] Applying SMOTE...
-✅ Balanced: 2560 Normal + 978 Stressed → 2560 + 2560
-
-[STEP 5/5] Training models...
-🏆 Best Model: XGBoost
-   Test Accuracy: 0.8921 ✅
-   Test AUC: 0.8843 ✅
-   Test F1: 0.8567 ✅
-
-✅ Model saved to src/model/artifacts/financial_stress_model.joblib
-```
-
 ### Step 3: Start API Server (30 seconds)
 
 ```bash
@@ -416,22 +384,6 @@ Invoke-RestMethod -Uri "http://localhost:8000/api/v1/score/example" -Method Get
 # Mac/Linux:
 curl http://localhost:8000/api/v1/score/example
 ```
-
-**Expected response:**
-```json
-{
-  "customer_id": "CUST_12345",
-  "risk_score": 0.7234,
-  "risk_level": "High",
-  "top_risk_factors": [
-    {"feature": "upi_to_loan_apps_pct", "contribution": 0.1523},
-    {"feature": "balance_drop_4w", "contribution": 0.1287},
-    {"feature": "salary_delay_trend", "contribution": 0.0945}
-  ]
-}
-```
-
----
 
 ## 📊 Model Training (Deep Dive)
 
@@ -869,54 +821,6 @@ Track these metrics:
 
 ---
 
-## 🧪 Testing
-
-### Unit Tests (Future Enhancement)
-
-```bash
-pytest tests/
-```
-
-### Manual Testing
-
-```bash
-# Test data generation
-python train_model_enhanced.py
-
-# Test API endpoints
-curl http://localhost:8000/health
-curl http://localhost:8000/api/v1/score/example
-
-# Test dashboard
-# Visit: http://localhost:8050
-
-# Test Kafka pipeline
-python src/ingestion/kafka_producer.py &
-python src/ingestion/kafka_consumer.py
-```
-
----
-
-## 🤝 Contributing
-
-### Development Workflow
-
-1. Create feature branch: `git checkout -b feature/new-feature`
-2. Make changes
-3. Test locally: `python train_model_enhanced.py`
-4. Commit: `git commit -m "Add new feature"`
-5. Push: `git push origin feature/new-feature`
-6. Create Pull Request
-
-### Code Style
-
-- **Python**: Follow PEP 8
-- **Notebooks**: Clear markdown documentation
-- **API**: RESTful conventions
-- **Logging**: Use Python logging module
-
----
-
 ## 📚 Key Concepts Explained
 
 ### Why Time-Based Split?
@@ -935,17 +839,6 @@ train = data[data['date'] <= '2024-06-30']  # Past
 test = data[data['date'] > '2024-09-30']    # Future
 # Model only sees past → No leakage!
 ```
-
-### Why 85-92% is Better than 100%
-
-| Scenario | Accuracy | Problem |
-|----------|----------|---------|
-| **Model A** | 100% | Memorized training data (overfitting) |
-| **Model B** | 88% | Learned real patterns (generalization) |
-
-**In production:**
-- Model A: Fails on new customers
-- Model B: Works reliably
 
 ### SHAP Explainability Example
 
@@ -1021,49 +914,4 @@ python train_model_enhanced.py
 ✅ **Realistic Performance**: 85-92% accuracy (not overfitted)  
 ✅ **Feature-Rich**: 33 behavioral features engineered  
 ✅ **Multi-Service**: API + Dashboard + Streaming  
-✅ **Containerized**: Docker Compose for easy deployment  
-
----
-
-## 📄 License
-
-This project is for educational and demonstration purposes.
-
----
-
-## 👨‍💻 Author
-
-Developed for Hack-O-Hire Financial ML Challenge
-
----
-
-## 🎯 Quick Reference
-
-**Start System:**
-```bash
-python train_model_enhanced.py  # Generate data + train (5 min)
-python app/main.py              # Start API (localhost:8000)
-python src/dashboard/dashboard_app.py  # Start dashboard (localhost:8050)
-```
-
-**Test System:**
-```bash
-curl http://localhost:8000/api/v1/score/example  # Test API
-# Visit: http://localhost:8050  # Test dashboard
-```
-
-**Key Files:**
-- `train_model_enhanced.py` - Main training script ⭐
-- `notebooks/model_training.ipynb` - Interactive training
-- `app/main.py` - REST API server
-- `src/dashboard/dashboard_app.py` - Visualization UI
-
-**Key Metrics:**
-- Test Accuracy: 87-92%
-- AUC: 0.85-0.90
-- F1 Score: 0.83-0.89
-- Data: 2.5M transactions, 5K features
-
----
-
-**🎉 System Ready! Start with `python train_model_enhanced.py`**
+✅ **Containerized**: Docker Compose for easy deployment
