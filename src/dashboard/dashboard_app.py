@@ -76,6 +76,8 @@ def load_dashboard_data():
 
         if scoring_service.is_loaded:
             risk_scores = []
+            risk_levels = []
+            
             for _, row in df.iterrows():
                 features = row.to_dict()
                 features = {k: v for k, v in features.items()
@@ -85,6 +87,7 @@ def load_dashboard_data():
                 risk_scores.append(result.get('risk_score', 0))
 
             df['risk_score'] = risk_scores
+            df['risk_level'] = risk_levels
         else:
             df['risk_score'] = df['is_stressed'].apply(lambda x: 0.8 if x == 1 else 0.2)
 
@@ -92,14 +95,15 @@ def load_dashboard_data():
 
     else:
         return pd.DataFrame({
-            'customer_id': range(1, 101),
-            'risk_score': np.random.uniform(0, 1, 100),
-            'is_stressed': np.random.choice([0, 1], 100),
-            'age': np.random.randint(25, 65, 100),
-            'monthly_income': np.random.uniform(30000, 150000, 100),
-            'balance_drop_pct_4weeks': np.random.uniform(0, 50, 100),
-            'upi_to_loan_apps_pct': np.random.uniform(0, 40, 100),
-            'failed_autopay_count': np.random.randint(0, 5, 100)
+            'customer_id': range(1, n+1),
+            'risk_score': risk_scores,
+            'risk_level': pd.cut(risk_scores, bins=[0, 0.4, 0.6, 0.8, 1.0], 
+                                labels=['Low', 'Medium', 'High', 'Critical']),
+            'is_stressed': (risk_scores > 0.6).astype(int),
+            'balance_drop_4w': np.random.uniform(0, 0.6, n),
+            'upi_to_loan_apps_pct': np.random.uniform(0, 0.4, n),
+            'salary_delay_trend': np.random.uniform(0, 20, n),
+            'failed_autopay_count': np.random.randint(0, 8, n)
         })
 
 df = load_dashboard_data()
@@ -234,6 +238,9 @@ def update_dashboard(risk_filter):
         bins=[0, 0.5, 0.75, 1.0],
         labels=['Low', 'Medium', 'High']
     )
+    fig1.update_traces(marker_line_width=1, marker_line_color='#003D5C', opacity=0.9)
+
+    # Figure 2: Risk Breakdown Donut Chart
     risk_counts = filtered_df['risk_level'].value_counts()
 
     fig2 = px.pie(values=risk_counts.values,
