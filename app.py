@@ -27,6 +27,7 @@ import pandas as pd
 
 from model import CreditScoringModel
 from utils import features_from_dict, FIELD_OPTIONS, NUMERIC_FIELDS, CATEGORICAL_COLS
+from api_bridge import router as api_router
 
 # ── Configuration (from .env) ────────────────────────────────────────
 
@@ -44,6 +45,9 @@ app = FastAPI(
     version="2.0.0",
 )
 app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_methods=["*"], allow_headers=["*"])
+
+# Mount the React frontend API bridge
+app.include_router(api_router)
 
 # ── Global state ──────────────────────────────────────────────────────
 
@@ -98,6 +102,13 @@ async def startup():
 
     _load_last_summary()
 
+    # Initialize cross-bank registry tables
+    try:
+        from cross_bank import create_cross_bank_tables
+        create_cross_bank_tables()
+    except Exception as e:
+        print(f"Cross-bank tables: {e}")
+
     try:
         from apscheduler.schedulers.background import BackgroundScheduler
         scheduler = BackgroundScheduler()
@@ -141,6 +152,9 @@ class PredictRequest(BaseModel):
     digital_engagement_score: int = 60
     utility_payment_score: int = 70
     loan_amount_requested_inr: float = 500000
+    # Optional: cross-bank identity for enhanced risk detection
+    pan: str = ""
+    phone: str = ""
 
 
 class PredictResponse(BaseModel):
@@ -148,6 +162,7 @@ class PredictResponse(BaseModel):
     default_probability: float
     risk_category: str
     timestamp: str = Field(default_factory=lambda: datetime.now().isoformat())
+    cross_bank_check: Optional[dict] = None
 
 
 # ── API Endpoints ─────────────────────────────────────────────────────
@@ -156,8 +171,25 @@ class PredictResponse(BaseModel):
 async def predict(req: PredictRequest):
     if scoring_model is None:
         raise HTTPException(503, "Model not loaded")
-    X = features_from_dict(req.dict(), scoring_model.feature_columns, scoring_model.label_encoders)
-    return scoring_model.predict_single(X)
+    feature_data = req.dict()
+    pan = feature_data.pop("pan", "")
+    phone = feature_data.pop("phone", "")
+    X = features_from_dict(feature_data, scoring_model.feature_columns, scoring_model.label_encoders)
+    result = scoring_model.predict_single(X)
+
+    # Enrich with cross-bank intelligence if PAN/phone provided
+    if pan and phone:
+        from cross_bank import enrich_prediction_with_cross_bank
+        if hasattr(result, "dict"):
+            result_dict = result.dict()
+        elif hasattr(result, "model_dump"):
+            result_dict = result.model_dump()
+        else:
+            result_dict = dict(result)
+        result_dict = enrich_prediction_with_cross_bank(result_dict, pan=pan, phone=phone)
+        return result_dict
+
+    return result
 
 
 @app.post("/run-batch")
@@ -332,16 +364,30 @@ async def analytics_data():
     }
 
 
-@app.get("/")
-async def root_redirect():
-    from fastapi.responses import RedirectResponse
-    return RedirectResponse(url="/dashboard")
+# ── Serve React frontend (SPA) ─────────────────────────────────────────
+
+_REACT_DIST = STATIC_DIR / "dist"
+_SPA_NOT_BUILT = (
+    "<h1>React app not built yet</h1>"
+    "<p>Run: <code>cd frontend && npm install && npm run build</code></p>"
+)
+
+# Serve Vite-built static assets (JS, CSS, images) at /assets/
+try:
+    from fastapi.staticfiles import StaticFiles
+    if (_REACT_DIST / "assets").exists():
+        app.mount("/assets", StaticFiles(directory=str(_REACT_DIST / "assets")), name="react-assets")
+except Exception:
+    pass
 
 
-@app.get("/dashboard", response_class=HTMLResponse)
-async def dashboard_page():
-    html = (STATIC_DIR / "dashboard.html").read_text()
-    return HTMLResponse(content=html)
+@app.get("/{full_path:path}", response_class=HTMLResponse)
+async def serve_spa(full_path: str):
+    """Catch-all: serve the React SPA index.html for all client-side routes."""
+    index = _REACT_DIST / "index.html"
+    if not index.exists():
+        return HTMLResponse(_SPA_NOT_BUILT, status_code=503)
+    return HTMLResponse(content=index.read_text())
 
 
 if __name__ == "__main__":

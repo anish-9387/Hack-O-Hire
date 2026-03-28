@@ -1,0 +1,42 @@
+[
+  {
+    "bank_id": "BANK_SBI",
+    "bank_name": "State Bank of India",
+    "bank_code": "SBI",
+    "joined_at": "2026-03-29T02:25:18.244477",
+    "is_active": true,
+    "total_defaults_reported": 14
+  },
+  {
+    "bank_id": "BANK_HDFC",
+    "bank_name": "HDFC Bank",
+    "bank_code": "HDFC",
+    "joined_at": "2026-03-29T02:25:18.256433",
+    "is_active": true,
+    "total_defaults_reported": 10
+  },
+  {
+    "bank_id": "BANK_ICICI",
+    "bank_name": "ICICI Bank",
+    "bank_code": "ICICI",
+    "joined_at": "2026-03-29T02:25:18.257886",
+    "is_active": true,
+    "total_defaults_reported": 10
+  },
+  {
+    "bank_id": "BANK_AXIS",
+    "bank_name": "Axis Bank",
+    "bank_code": "AXIS",
+    "joined_at": "2026-03-29T02:25:18.258670",
+    "is_active": true,
+    "total_defaults_reported": 15
+  },
+  {
+    "bank_id": "BANK_PNB",
+    "bank_name": "Punjab National Bank",
+    "bank_code": "PNB",
+    "joined_at": "2026-03-29T02:25:18.259453",
+    "is_active": true,
+    "total_defaults_reported": 16
+  }
+]

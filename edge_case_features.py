@@ -512,6 +512,40 @@ def engineer_edge_case_features(df: pd.DataFrame) -> pd.DataFrame:
         + df["emi_stress"]                                         # EMI burden
     )
 
+    # ================================================================
+    #  18. CROSS-BANK DEFAULTER SIGNALS (Ecosystem Feature)
+    #      If cross-bank data columns are present (injected by
+    #      cross_bank.py during batch scoring), create derived features.
+    #      During training these default to 0 (no cross-bank data).
+    # ================================================================
+
+    # These columns are injected by cross_bank enrichment; default to 0
+    for cb_col in [
+        "cross_bank_default_flag", "cross_bank_default_count",
+        "cross_bank_banks_defaulted", "cross_bank_max_dpd",
+        "cross_bank_worst_npa", "cross_bank_serial_defaulter",
+        "cross_bank_risk_boost",
+    ]:
+        if cb_col not in df.columns:
+            df[cb_col] = 0
+
+    # Combined cross-bank risk signal (0-1 scale)
+    df["cross_bank_risk_signal"] = (
+        df["cross_bank_default_flag"] * 0.3
+        + np.clip(df["cross_bank_default_count"] / 5, 0, 1) * 0.2
+        + np.clip(df["cross_bank_banks_defaulted"] / 3, 0, 1) * 0.2
+        + df["cross_bank_serial_defaulter"] * 0.15
+        + np.clip(df["cross_bank_max_dpd"] / 365, 0, 1) * 0.15
+    )
+
+    # Cross-bank contradiction: appears clean locally but flagged elsewhere
+    df["cross_bank_hidden_risk"] = np.where(
+        (df["cross_bank_default_flag"] == 1)
+        & (df["days_past_due_dpd"] == 0)
+        & (df["num_late_payments_12m"] == 0),
+        1, 0,
+    )
+
     return df
 
 
@@ -553,6 +587,12 @@ EDGE_CASE_FEATURES = [
     "estimated_lgd_inr", "expected_loss_inr",
     # Behavioral deterioration (Ch 1)
     "behavioral_deterioration",
+    # Cross-bank ecosystem (Ch 18)
+    "cross_bank_default_flag", "cross_bank_default_count",
+    "cross_bank_banks_defaulted", "cross_bank_max_dpd",
+    "cross_bank_worst_npa", "cross_bank_serial_defaulter",
+    "cross_bank_risk_boost", "cross_bank_risk_signal",
+    "cross_bank_hidden_risk",
 ]
 
 # Stage labels for display

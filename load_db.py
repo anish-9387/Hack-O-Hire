@@ -1,46 +1,55 @@
 """
-Load the CSV dataset into PostgreSQL.
+Load the CSV dataset into PostgreSQL and set up all tables.
 
 Run this ONCE after setting up PostgreSQL:
     python load_db.py
 
 Prerequisites:
-    1. PostgreSQL running (brew services start postgresql OR docker)
-    2. Database created: createdb credit_risk
-    3. (Optional) Set DATABASE_URL env var, or edit db.py default
+    1. PostgreSQL running
+    2. Database created: createdb risk_sense  (or whatever DATABASE_URL points to)
+    3. Set DATABASE_URL in .env
 
 What this does:
-    1. Creates tables (borrowers, scoring_results, scoring_runs)
+    1. Creates all tables (borrowers, scoring_results, scoring_runs, audit_logs, interventions)
     2. Loads india_credit_risk_dataset_100k.csv into the borrowers table
     3. Verifies the data is loaded correctly
 """
+import os
+from dotenv import load_dotenv
+load_dotenv()
+
 from db import load_csv_to_db, get_engine, create_tables, test_connection
 from sqlalchemy import text
+
+DATASET_PATH = os.environ.get("DATASET_PATH", "Datasets/india_credit_risk_dataset_100k.csv")
 
 
 def main():
     print("=" * 60)
-    print("  Loading Dataset into PostgreSQL")
+    print("  RiskSense — Database Setup")
     print("=" * 60)
 
     # Step 1: Test connection
-    print("\n[1/3] Testing database connection...")
+    print("\n[1/4] Testing database connection...")
     if not test_connection():
         print("\nFAILED. Make sure PostgreSQL is running.")
         print("Quick setup:")
-        print("  brew install postgresql@15     # macOS")
-        print("  brew services start postgresql@15")
-        print("  createdb credit_risk")
-        print("\nOr set DATABASE_URL:")
-        print("  export DATABASE_URL=postgresql://user:pass@localhost:5432/credit_risk")
+        print("  # Windows (after installing PostgreSQL):")
+        print("  psql -U postgres -c \"CREATE DATABASE risk_sense;\"")
+        print("\nOr set DATABASE_URL in .env:")
+        print("  DATABASE_URL=postgresql://postgres:yourpass@localhost:5432/risk_sense")
         return
 
-    # Step 2: Load CSV
-    print("\n[2/3] Loading CSV into PostgreSQL...")
-    count = load_csv_to_db("Datasets/india_credit_risk_dataset_100k.csv")
+    # Step 2: Create tables
+    print("\n[2/4] Creating tables...")
+    create_tables()
 
-    # Step 3: Verify
-    print("\n[3/3] Verifying...")
+    # Step 3: Load CSV
+    print(f"\n[3/4] Loading {DATASET_PATH} into PostgreSQL...")
+    count = load_csv_to_db(DATASET_PATH)
+
+    # Step 4: Verify
+    print("\n[4/4] Verifying...")
     engine = get_engine()
     with engine.connect() as conn:
         result = conn.execute(text("SELECT COUNT(*) FROM borrowers")).fetchone()
@@ -53,8 +62,13 @@ def main():
         for row in result:
             print(f"    {row[0]:30s} {row[1]:>6}")
 
+        # Check all tables exist
+        for table in ["borrowers", "scoring_results", "scoring_runs", "audit_logs", "interventions"]:
+            r = conn.execute(text(f"SELECT COUNT(*) FROM {table}")).fetchone()
+            print(f"  {table}: {r[0]} rows")
+
     print(f"\nDone! {count} borrowers loaded into PostgreSQL.")
-    print("You can now run: uvicorn app:app --reload --port 8000")
+    print("Run the app:  uvicorn app:app --reload --port 8000")
 
 
 if __name__ == "__main__":

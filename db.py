@@ -134,6 +134,36 @@ def create_tables():
             )
         """))
 
+        # Audit logs — immutable ledger of system actions
+        conn.execute(text("""
+            CREATE TABLE IF NOT EXISTS audit_logs (
+                id SERIAL PRIMARY KEY,
+                action VARCHAR(100) NOT NULL,
+                user_id VARCHAR(100) DEFAULT 'SYSTEM',
+                resource_type VARCHAR(50),
+                resource_id VARCHAR(100),
+                ip_address VARCHAR(45),
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            )
+        """))
+
+        # Interventions — proactive steps for high-risk borrowers
+        conn.execute(text("""
+            CREATE TABLE IF NOT EXISTS interventions (
+                id SERIAL PRIMARY KEY,
+                intervention_id VARCHAR(20) UNIQUE NOT NULL,
+                borrower_id VARCHAR(20),
+                user_name VARCHAR(100),
+                type VARCHAR(50) NOT NULL,
+                status VARCHAR(20) DEFAULT 'pending',
+                priority VARCHAR(20) DEFAULT 'medium',
+                description TEXT,
+                assigned_to VARCHAR(100),
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            )
+        """))
+
         conn.commit()
     print("Tables created/verified")
 
@@ -298,6 +328,64 @@ def get_high_risk_borrowers(limit: int = 100) -> list:
         return df.to_dict(orient="records")
     except Exception:
         return []
+
+
+# ── Audit Logs ───────────────────────────────────────────────────────
+
+def save_audit_log(action: str, user_id: str = "SYSTEM", resource_type: str = "",
+                   resource_id: str = "", ip_address: str = ""):
+    """Insert a single audit log entry."""
+    engine = get_engine()
+    with engine.connect() as conn:
+        conn.execute(text("""
+            INSERT INTO audit_logs (action, user_id, resource_type, resource_id, ip_address)
+            VALUES (:action, :user_id, :resource_type, :resource_id, :ip)
+        """), {
+            "action": action, "user_id": user_id,
+            "resource_type": resource_type, "resource_id": resource_id,
+            "ip": ip_address,
+        })
+        conn.commit()
+
+
+def get_audit_logs(limit: int = 50) -> list:
+    """Retrieve recent audit logs."""
+    engine = get_engine()
+    df = pd.read_sql(
+        f"SELECT * FROM audit_logs ORDER BY created_at DESC LIMIT {limit}", engine
+    )
+    return df.to_dict(orient="records")
+
+
+# ── Interventions ────────────────────────────────────────────────────
+
+def save_intervention(intervention: dict):
+    """Insert a new intervention."""
+    engine = get_engine()
+    with engine.connect() as conn:
+        conn.execute(text("""
+            INSERT INTO interventions (intervention_id, borrower_id, user_name, type, status, priority, description, assigned_to)
+            VALUES (:iid, :bid, :uname, :type, :status, :priority, :desc, :assigned)
+        """), {
+            "iid": intervention.get("id", ""),
+            "bid": intervention.get("userId", ""),
+            "uname": intervention.get("userName", ""),
+            "type": intervention.get("type", ""),
+            "status": intervention.get("status", "pending"),
+            "priority": intervention.get("priority", "medium"),
+            "desc": intervention.get("description", ""),
+            "assigned": intervention.get("assignedTo", ""),
+        })
+        conn.commit()
+
+
+def get_interventions(limit: int = 50) -> list:
+    """Retrieve interventions."""
+    engine = get_engine()
+    df = pd.read_sql(
+        f"SELECT * FROM interventions ORDER BY created_at DESC LIMIT {limit}", engine
+    )
+    return df.to_dict(orient="records")
 
 
 if __name__ == "__main__":
