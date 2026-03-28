@@ -1,0 +1,126 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Credit Risk - Check Your Score</title>
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800&display=swap" rel="stylesheet">
+<style>
+:root {
+    --bg: #0f1117; --surface: #1a1d2e; --surface2: #232740; --border: #2e3348;
+    --text: #e4e6f0; --text2: #9498b3;
+    --accent: #6366f1; --accent2: #818cf8; --accent-glow: rgba(99,102,241,0.15);
+}
+* { margin: 0; padding: 0; box-sizing: border-box; }
+body {
+    font-family: 'Inter', sans-serif; background: var(--bg); color: var(--text);
+    min-height: 100vh; display: flex; align-items: center; justify-content: center;
+    -webkit-font-smoothing: antialiased;
+}
+.bg-grid {
+    position: fixed; inset: 0; z-index: 0;
+    background-image:
+        linear-gradient(rgba(99,102,241,0.03) 1px, transparent 1px),
+        linear-gradient(90deg, rgba(99,102,241,0.03) 1px, transparent 1px);
+    background-size: 60px 60px;
+}
+.bg-glow {
+    position: fixed; top: -200px; left: 50%; transform: translateX(-50%);
+    width: 600px; height: 600px;
+    background: radial-gradient(circle, rgba(99,102,241,0.08), transparent 70%);
+    z-index: 0;
+}
+.login-card {
+    position: relative; z-index: 1;
+    background: var(--surface); border: 1px solid var(--border);
+    border-radius: 24px; padding: 48px 44px; width: 420px;
+    text-align: center;
+    box-shadow: 0 20px 60px rgba(0,0,0,0.3);
+}
+.logo {
+    width: 56px; height: 56px; margin: 0 auto 24px;
+    background: linear-gradient(135deg, var(--accent), #a78bfa);
+    border-radius: 16px; display: flex; align-items: center; justify-content: center;
+    font-size: 1.4rem; font-weight: 800; color: #fff;
+}
+h1 { font-size: 1.5rem; font-weight: 700; margin-bottom: 8px; letter-spacing: -0.5px; }
+.subtitle { color: var(--text2); font-size: 0.9rem; margin-bottom: 36px; line-height: 1.5; }
+.input-group { position: relative; margin-bottom: 16px; text-align: left; }
+.input-group label {
+    display: block; font-size: 0.78rem; font-weight: 600; color: var(--text2);
+    margin-bottom: 8px; text-transform: uppercase; letter-spacing: 0.6px;
+}
+.input-group input {
+    width: 100%; padding: 14px 16px; background: var(--surface2);
+    border: 1.5px solid var(--border); border-radius: 12px;
+    color: var(--text); font-size: 1rem; font-family: 'Inter', sans-serif;
+    outline: none; transition: all 0.2s;
+}
+.input-group input:focus {
+    border-color: var(--accent); box-shadow: 0 0 0 3px var(--accent-glow);
+}
+.input-group input::placeholder { color: #555a70; }
+.btn {
+    width: 100%; padding: 14px; margin-top: 8px;
+    background: linear-gradient(135deg, var(--accent), #7c3aed);
+    color: #fff; border: none; border-radius: 12px;
+    font-size: 0.95rem; font-weight: 600; font-family: 'Inter', sans-serif;
+    cursor: pointer; transition: all 0.2s; letter-spacing: 0.2px;
+}
+.btn:hover { transform: translateY(-1px); box-shadow: 0 8px 24px rgba(99,102,241,0.3); }
+.btn:active { transform: translateY(0); }
+.btn:disabled { opacity: 0.5; pointer-events: none; }
+.error {
+    display: none; margin-top: 16px; padding: 12px 16px;
+    background: rgba(239,68,68,0.1); border: 1px solid rgba(239,68,68,0.2);
+    border-radius: 10px; color: #ef4444; font-size: 0.85rem;
+}
+.error.show { display: block; }
+.helper {
+    margin-top: 24px; font-size: 0.78rem; color: var(--text2); line-height: 1.5;
+}
+.helper code {
+    background: var(--surface2); padding: 2px 8px; border-radius: 4px;
+    font-family: 'SF Mono', monospace; font-size: 0.75rem;
+}
+</style>
+</head>
+<body>
+<div class="bg-grid"></div>
+<div class="bg-glow"></div>
+<div class="login-card">
+    <div class="logo">CR</div>
+    <h1>Check Your Credit Score</h1>
+    <p class="subtitle">Enter your Borrower ID to view your credit risk assessment and financial health status</p>
+    <form id="loginForm">
+        <div class="input-group">
+            <label>Borrower ID</label>
+            <input type="text" id="borrowerId" placeholder="e.g. IND000001" autocomplete="off" autofocus required>
+        </div>
+        <button type="submit" class="btn" id="loginBtn">View My Score</button>
+    </form>
+    <div class="error" id="error"></div>
+    <p class="helper">Your Borrower ID format: <code>IND000001</code> to <code>IND100000</code></p>
+</div>
+<script>
+document.getElementById('loginForm').addEventListener('submit', async (e) => {
+    e.preventDefault();
+    const id = document.getElementById('borrowerId').value.trim().toUpperCase();
+    const btn = document.getElementById('loginBtn');
+    const err = document.getElementById('error');
+    err.classList.remove('show');
+    btn.disabled = true; btn.textContent = 'Loading...';
+
+    try {
+        const r = await fetch('/api/user/' + encodeURIComponent(id));
+        if (r.status === 404) { throw new Error('Borrower ID not found. Please check and try again.'); }
+        if (!r.ok) { throw new Error('Server error. Please try again.'); }
+        window.location.href = '/dashboard/' + encodeURIComponent(id);
+    } catch(ex) {
+        err.textContent = ex.message; err.classList.add('show');
+        btn.disabled = false; btn.textContent = 'View My Score';
+    }
+});
+</script>
+</body>
+</html>
