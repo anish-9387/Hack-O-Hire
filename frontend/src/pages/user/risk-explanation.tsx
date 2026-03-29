@@ -8,27 +8,27 @@ import {
   ShieldAlert, ThumbsUp, AlertTriangle, Lightbulb, TrendingUp, TrendingDown,
   Activity, Brain, Clock, CheckCircle2, ArrowRight
 } from "lucide-react"
-import { 
-  ResponsiveContainer, BarChart, Bar, XAxis, YAxis, Tooltip, CartesianGrid, 
-  Cell, RadarChart, PolarGrid, PolarAngleAxis, Radar
+import {
+  ResponsiveContainer, BarChart, Bar, XAxis, YAxis, Tooltip, CartesianGrid, Cell
 } from "recharts"
 import { motion } from "framer-motion"
 import { useLocation } from "wouter"
 import { getRiskColor, getRiskColorHex } from "@/lib/utils"
 
 const FEATURE_LABELS: Record<string, { label: string; description: string; icon: string }> = {
-  loanAppTransactionCount: { label: 'Loan App Usage', description: 'Frequency of loan app transactions (KreditBee, MoneyTap, etc.)', icon: '💳' },
-  balanceDrop4w: { label: 'Balance Decline', description: 'Significant balance reduction in last 4 weeks', icon: '📉' },
-  spendingSpikeScore: { label: 'Spending Spike', description: 'Unusual spending surge above normal pattern', icon: '🛒' },
-  emiPaymentRatio: { label: 'EMI Burden', description: 'EMI payments as % of total income', icon: '🏠' },
-  salaryDelayTrend: { label: 'Salary Irregularity', description: 'Inconsistent or delayed salary credits', icon: '⏰' },
-  atmWithdrawalFrequency: { label: 'ATM Dependency', description: 'Heavy reliance on cash withdrawals', icon: '🏧' },
-  cashDependencyScore: { label: 'Cash Dependency', description: 'Preference for cash over digital payments', icon: '💵' },
-  festivalSpendingSpike: { label: 'Festival Overspend', description: 'Excessive spending during festival seasons', icon: '🪔' },
-  failedAutopayCount: { label: 'Failed Auto-payments', description: 'Number of bounced or failed auto-debit mandates', icon: '❌' },
+  debtToIncomeRatio: { label: 'Debt-to-Income Ratio', description: 'Total debt obligations as percentage of monthly income', icon: '📊' },
+  paymentToIncomeRatio: { label: 'EMI Burden', description: 'EMI payments as percentage of total income', icon: '🏠' },
+  creditUtilisation: { label: 'Credit Utilisation', description: 'Percentage of available credit being used', icon: '💳' },
+  daysPastDue: { label: 'Overdue Payments', description: 'Number of days past due on loan payments', icon: '⏰' },
+  latePayments: { label: 'Late Payments', description: 'Number of late payments in last 12 months', icon: '❌' },
+  previousDefault: { label: 'Previous Default', description: 'History of loan default on record', icon: '⚠️' },
+  hardEnquiries: { label: 'Credit Enquiries', description: 'Number of hard credit pulls in last 12 months', icon: '🔍' },
+  loanToValueRatio: { label: 'Loan-to-Value', description: 'Loan amount relative to asset value', icon: '🏦' },
+  lowCibilScore: { label: 'Low CIBIL Score', description: 'Credit bureau score below healthy threshold', icon: '📉' },
   incomeConsistency: { label: 'Income Stability', description: 'Regularity and consistency of income credits', icon: '📊' },
-  lowBalanceFrequency: { label: 'Low Balance Events', description: 'How often balance drops below safety threshold', icon: '⚡' },
-  upiToLoanAppsPct: { label: 'UPI→Loan Apps', description: 'UPI payments directed to loan/lending apps', icon: '📱' },
+  utilityPaymentScore: { label: 'Utility Payments', description: 'Track record of on-time utility bill payments', icon: '💡' },
+  digitalEngagement: { label: 'Digital Activity', description: 'Usage of digital banking and payment platforms', icon: '📱' },
+  highCibilScore: { label: 'Strong Credit Score', description: 'CIBIL score above 700 indicates good creditworthiness', icon: '✅' },
 }
 
 export default function RiskExplanation() {

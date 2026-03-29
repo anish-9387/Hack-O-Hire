@@ -4,21 +4,26 @@ API Bridge — /api/* endpoints for the React frontend (AI-Pipeline UI).
 Translates the frontend's expected API contract to the existing
 Hack-O-Hire FastAPI backend data (model, CSV, batch results).
 
-Token scheme: base64-encoded JSON  {"role": "user"|"admin", "borrower_id": "BID_..."}
+Auth: JWT (HS256) with bcrypt password hashing.
 """
 import base64
+import io
 import json
+import os
 import random
 import math
 from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Optional
 
+import bcrypt
+import jwt
 import numpy as np
 import pandas as pd
-from fastapi import APIRouter, Header, HTTPException
-from fastapi.responses import JSONResponse
-from pydantic import BaseModel
+from fastapi import APIRouter, Depends, Header, HTTPException, Request
+from fastapi.responses import JSONResponse, StreamingResponse
+from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
+from pydantic import BaseModel, Field
 
 # ── Paths (relative to project root) ─────────────────────────────────
 DATASET_PATH   = Path("Datasets/india_credit_risk_dataset_100k.csv")
@@ -26,6 +31,36 @@ RESULTS_PATH   = Path("data/processed/batch_results.csv")
 HIGH_RISK_PATH = Path("data/processed/high_risk.csv")
 SUMMARY_PATH   = Path("data/processed/batch_summary.json")
 ARTIFACTS_DIR  = "src/model/artifacts"
+
+# ── JWT & Auth Configuration ─────────────────────────────────────────
+JWT_SECRET      = os.environ.get("JWT_SECRET", "finhealth-super-secret-key-change-in-production")
+JWT_ALGORITHM   = "HS256"
+ACCESS_TOKEN_EXPIRE_MINUTES  = 60      # 1 hour
+REFRESH_TOKEN_EXPIRE_MINUTES = 10080   # 7 days
+
+_bearer_scheme = HTTPBearer(auto_error=False)
+
+# In-memory user store (production would use a database)
+# Passwords are bcrypt-hashed
+_USER_STORE: dict[str, dict] = {}
+
+def _init_demo_users():
+    """Create demo users with bcrypt-hashed passwords on startup."""
+    global _USER_STORE
+    demo_users = [
+        {"email": "admin@demo.com",  "password": "admin123", "role": "admin", "name": "Risk Admin"},
+        {"email": "user@demo.com",   "password": "demo123",  "role": "user",  "name": "Demo User"},
+    ]
+    for u in demo_users:
+        hashed = bcrypt.hashpw(u["password"].encode("utf-8"), bcrypt.gensalt()).decode("utf-8")
+        _USER_STORE[u["email"]] = {
+            "email":         u["email"],
+            "password_hash": hashed,
+            "role":          u["role"],
+            "name":          u["name"],
+        }
+
+_init_demo_users()
 
 router = APIRouter(prefix="/api")
 
@@ -56,27 +91,68 @@ def _reload_results():
     return _results
 
 
-# ── Token helpers ──────────────────────────────────────────────────────
+# ── JWT Token helpers ─────────────────────────────────────────────────
 
-def _make_token(role: str, borrower_id: str = "") -> str:
-    payload = {"role": role, "borrower_id": borrower_id, "ts": datetime.now().isoformat()}
-    return base64.b64encode(json.dumps(payload).encode()).decode()
+def _create_access_token(data: dict) -> str:
+    """Create a short-lived JWT access token."""
+    payload = {
+        **data,
+        "type": "access",
+        "iat": datetime.utcnow(),
+        "exp": datetime.utcnow() + timedelta(minutes=ACCESS_TOKEN_EXPIRE_MINUTES),
+    }
+    return jwt.encode(payload, JWT_SECRET, algorithm=JWT_ALGORITHM)
+
+
+def _create_refresh_token(data: dict) -> str:
+    """Create a long-lived JWT refresh token."""
+    payload = {
+        **data,
+        "type": "refresh",
+        "iat": datetime.utcnow(),
+        "exp": datetime.utcnow() + timedelta(minutes=REFRESH_TOKEN_EXPIRE_MINUTES),
+    }
+    return jwt.encode(payload, JWT_SECRET, algorithm=JWT_ALGORITHM)
+
+
+def _decode_token(token: str) -> dict:
+    """Decode and validate a JWT token. Raises on expiry or invalid signature."""
+    try:
+        return jwt.decode(token, JWT_SECRET, algorithms=[JWT_ALGORITHM])
+    except jwt.ExpiredSignatureError:
+        raise HTTPException(401, "Token has expired")
+    except jwt.InvalidTokenError:
+        raise HTTPException(401, "Invalid token")
 
 
 def _parse_token(authorization: str = "") -> dict:
-    """Parse Authorization: Bearer <token> → dict with role / borrower_id."""
+    """Parse Authorization header → dict with role / borrower_id.
+    Gracefully handles missing/invalid tokens for backwards compatibility."""
     try:
         token = authorization.replace("Bearer ", "").strip()
-        return json.loads(base64.b64decode(token).decode())
+        if not token:
+            return {"role": "user", "borrower_id": ""}
+        return jwt.decode(token, JWT_SECRET, algorithms=[JWT_ALGORITHM])
     except Exception:
-        return {"role": "user", "borrower_id": ""}
+        # Fallback: try legacy base64 tokens during migration
+        try:
+            return json.loads(base64.b64decode(token).decode())
+        except Exception:
+            return {"role": "user", "borrower_id": ""}
 
 
-def _require_auth(authorization: str = Header(default="")) -> dict:
-    info = _parse_token(authorization)
-    if not info.get("role"):
-        raise HTTPException(401, "Unauthorized")
-    return info
+async def _get_current_user(credentials: Optional[HTTPAuthorizationCredentials] = Depends(_bearer_scheme)) -> dict:
+    """FastAPI dependency: extract and validate the current user from JWT."""
+    if credentials is None:
+        raise HTTPException(401, "Authentication required")
+    return _decode_token(credentials.credentials)
+
+
+async def _require_admin(user: dict = Depends(_get_current_user)) -> dict:
+    """FastAPI dependency: require admin role."""
+    if user.get("role") != "admin":
+        raise HTTPException(403, "Admin access required")
+    return user
 
 
 # ── Synthetic data helpers ─────────────────────────────────────────────
@@ -261,47 +337,64 @@ class LoginRequest(BaseModel):
     role: str = "user"
 
 
+class RegisterRequest(BaseModel):
+    email: str
+    password: str = Field(..., min_length=6)
+    name: str
+    role: str = "user"
+
+
+class RefreshRequest(BaseModel):
+    refreshToken: str
+
+
+# Revoked tokens set (in production, use Redis or DB)
+_revoked_tokens: set[str] = set()
+
+
 @router.post("/auth/login")
 async def api_login(req: LoginRequest):
     ds = _get_dataset()
 
-    if req.role == "admin":
-        token = _make_token("admin", "ADMIN")
-        log_audit("USER_LOGIN", req.email, "session", f"SES-{random.randint(1000,9999)}")
-        return {
-            "token": token,
-            "role":  "admin",
-            "user": {
-                "id":    "ADMIN",
-                "name":  "Risk Admin",
-                "email": req.email,
-                "role":  "admin",
-                "city":  "Mumbai",
-                "state": "Maharashtra",
-            },
-        }
-
-    # User login: treat email field as borrower_id (or pick a demo one)
-    borrower_id = req.email.strip()
-    if ds is not None:
-        if borrower_id not in ds["borrower_id"].values:
-            # pick the first borrower as demo
-            borrower_id = ds["borrower_id"].iloc[0]
-        row = ds[ds["borrower_id"] == borrower_id].iloc[0]
-        name = f"Borrower {borrower_id[-4:]}"
-        city  = str(row.get("state", "Mumbai")).split()[0]
-        state = str(row.get("state", "Maharashtra"))
-        emp   = str(row.get("employment_type", "Salaried"))
-        inc   = float(row.get("monthly_net_income_inr", 50000))
+    # Verify credentials against user store
+    stored_user = _USER_STORE.get(req.email)
+    if stored_user:
+        if not bcrypt.checkpw(req.password.encode("utf-8"), stored_user["password_hash"].encode("utf-8")):
+            raise HTTPException(401, "Invalid email or password")
+        role = stored_user["role"]
     else:
-        name, city, state, emp, inc = "Demo User", "Mumbai", "Maharashtra", "Salaried", 50000.0
+        # For demo: allow any email/password for user role, reject unknown admin
+        if req.role == "admin":
+            raise HTTPException(401, "Invalid admin credentials")
+        role = "user"
 
-    token = _make_token("user", borrower_id)
-    log_audit("USER_LOGIN", req.email, "session", f"SES-{random.randint(1000,9999)}")
-    return {
-        "token": token,
-        "role":  "user",
-        "user": {
+    # Build user info based on role
+    if role == "admin":
+        borrower_id = "ADMIN"
+        user_info = {
+            "id":    "ADMIN",
+            "name":  stored_user["name"] if stored_user else "Admin",
+            "email": req.email,
+            "role":  "admin",
+            "city":  "Mumbai",
+            "state": "Maharashtra",
+        }
+    else:
+        # User login: treat email as borrower_id or pick demo one
+        borrower_id = req.email.strip()
+        if ds is not None:
+            if borrower_id not in ds["borrower_id"].values:
+                borrower_id = ds["borrower_id"].iloc[0]
+            row = ds[ds["borrower_id"] == borrower_id].iloc[0]
+            name = stored_user["name"] if stored_user else f"Borrower {borrower_id[-4:]}"
+            city  = str(row.get("state", "Mumbai")).split()[0]
+            state = str(row.get("state", "Maharashtra"))
+            emp   = str(row.get("employment_type", "Salaried"))
+            inc   = float(row.get("monthly_net_income_inr", 50000))
+        else:
+            name, city, state, emp, inc = "Demo User", "Mumbai", "Maharashtra", "Salaried", 50000.0
+
+        user_info = {
             "id":             borrower_id,
             "name":           name,
             "email":          req.email,
@@ -310,33 +403,262 @@ async def api_login(req: LoginRequest):
             "state":          state,
             "employmentType": emp,
             "monthlyIncome":  inc,
+        }
+
+    token_data = {"role": role, "borrower_id": borrower_id, "email": req.email}
+    access_token  = _create_access_token(token_data)
+    refresh_token = _create_refresh_token(token_data)
+
+    log_audit("USER_LOGIN", req.email, "session", f"SES-{random.randint(1000,9999)}")
+    return {
+        "token":        access_token,
+        "refreshToken": refresh_token,
+        "expiresIn":    ACCESS_TOKEN_EXPIRE_MINUTES * 60,
+        "role":         role,
+        "user":         user_info,
+    }
+
+
+@router.post("/auth/register")
+async def api_register(req: RegisterRequest):
+    """Register a new user account with bcrypt-hashed password."""
+    if req.email in _USER_STORE:
+        raise HTTPException(409, "An account with this email already exists")
+
+    hashed = bcrypt.hashpw(req.password.encode("utf-8"), bcrypt.gensalt()).decode("utf-8")
+    _USER_STORE[req.email] = {
+        "email":         req.email,
+        "password_hash": hashed,
+        "role":          req.role if req.role in ("user", "admin") else "user",
+        "name":          req.name,
+    }
+
+    # Auto-login after registration
+    borrower_id = req.email
+    ds = _get_dataset()
+    if ds is not None and borrower_id not in ds["borrower_id"].values:
+        borrower_id = ds["borrower_id"].iloc[0]
+
+    token_data = {"role": req.role, "borrower_id": borrower_id, "email": req.email}
+    access_token  = _create_access_token(token_data)
+    refresh_token = _create_refresh_token(token_data)
+
+    log_audit("USER_REGISTER", req.email, "session", f"SES-{random.randint(1000,9999)}")
+    return {
+        "token":        access_token,
+        "refreshToken": refresh_token,
+        "expiresIn":    ACCESS_TOKEN_EXPIRE_MINUTES * 60,
+        "role":         req.role,
+        "user": {
+            "id":    borrower_id,
+            "name":  req.name,
+            "email": req.email,
+            "role":  req.role,
         },
     }
 
 
+@router.post("/auth/refresh")
+async def api_refresh_token(req: RefreshRequest):
+    """Exchange a valid refresh token for a new access token."""
+    if req.refreshToken in _revoked_tokens:
+        raise HTTPException(401, "Refresh token has been revoked")
+
+    payload = _decode_token(req.refreshToken)
+    if payload.get("type") != "refresh":
+        raise HTTPException(401, "Invalid token type — expected refresh token")
+
+    token_data = {"role": payload["role"], "borrower_id": payload["borrower_id"], "email": payload["email"]}
+    new_access = _create_access_token(token_data)
+
+    return {
+        "token":     new_access,
+        "expiresIn": ACCESS_TOKEN_EXPIRE_MINUTES * 60,
+    }
+
+
+@router.post("/auth/logout")
+async def api_logout(authorization: str = Header(default="")):
+    """Revoke the current tokens."""
+    try:
+        token = authorization.replace("Bearer ", "").strip()
+        if token:
+            _revoked_tokens.add(token)
+    except Exception:
+        pass
+    return {"message": "Logged out successfully"}
+
+
+@router.get("/auth/me")
+async def api_get_me(user: dict = Depends(_get_current_user)):
+    """Return the current authenticated user's profile."""
+    ds = _get_dataset()
+    bid = user.get("borrower_id", "")
+    role = user.get("role", "user")
+
+    if role == "admin":
+        return {
+            "id": "ADMIN", "name": "Risk Admin",
+            "email": user.get("email", ""), "role": "admin",
+        }
+
+    if ds is not None and bid in ds["borrower_id"].values:
+        row = ds[ds["borrower_id"] == bid].iloc[0]
+        return {
+            "id": bid,
+            "name": f"Borrower {bid[-4:]}",
+            "email": user.get("email", ""),
+            "role": "user",
+            "city": str(row.get("state", "Mumbai")).split()[0],
+            "state": str(row.get("state", "Maharashtra")),
+            "employmentType": str(row.get("employment_type", "Salaried")),
+            "monthlyIncome": float(row.get("monthly_net_income_inr", 50000)),
+        }
+
+    return {"id": bid, "name": "User", "email": user.get("email", ""), "role": "user"}
+
+
 # ── Dashboard Overview ─────────────────────────────────────────────────
+
+def _get_borrower_full(borrower_id: str):
+    """Return (dataset_row, results_row) for a borrower, or (None, None)."""
+    ds = _get_dataset()
+    results = _get_results()
+    ds_row = res_row = None
+    if ds is not None and borrower_id and borrower_id in ds["borrower_id"].values:
+        ds_row = ds[ds["borrower_id"] == borrower_id].iloc[0]
+    if results is not None and borrower_id and borrower_id in results["borrower_id"].values:
+        res_row = results[results["borrower_id"] == borrower_id].iloc[0]
+    return ds_row, res_row
+
+
+def _real_spending(ds_row, income: float, prob: float) -> list:
+    """Build spending breakdown from REAL dataset columns."""
+    dti  = _safe_float(ds_row.get("debt_to_income_ratio")) if ds_row is not None else 0.3
+    pti  = _safe_float(ds_row.get("payment_to_income_ratio_pti")) if ds_row is not None else 0.2
+    cu   = _safe_float(ds_row.get("credit_utilisation_ratio")) if ds_row is not None else 0.4
+
+    emi_amount   = round(income * pti, 0)
+    debt_payment = round(income * dti - emi_amount, 0) if dti > pti else 0
+    rent         = round(income * 0.25, 0)
+    groceries    = round(income * 0.10, 0)
+    utilities    = round(income * 0.05, 0)
+    discretionary = round(income * max(0.02, 0.08 - prob * 0.06), 0)
+
+    items = [
+        {"category": "emi_payment",   "amount": max(emi_amount, 0),   "percentage": round(pti * 100, 1)},
+        {"category": "rent",          "amount": rent,                 "percentage": 25.0},
+        {"category": "grocery",       "amount": groceries,            "percentage": 10.0},
+        {"category": "utility_bill",  "amount": utilities,            "percentage": 5.0},
+        {"category": "debt_payment",  "amount": max(debt_payment, 0), "percentage": round(max(dti - pti, 0) * 100, 1)},
+        {"category": "discretionary", "amount": discretionary,        "percentage": round(discretionary / max(income, 1) * 100, 1)},
+    ]
+    return [i for i in sorted(items, key=lambda x: -x["amount"]) if i["amount"] > 0]
+
+
+def _real_transactions(borrower_id: str, ds_row, income: float, prob: float) -> list:
+    """Build transactions from REAL dataset columns rather than templates."""
+    rng = random.Random(hash(borrower_id) & 0xFFFF)
+    pti  = _safe_float(ds_row.get("payment_to_income_ratio_pti")) if ds_row is not None else 0.2
+    dpd  = _safe_int(ds_row.get("days_past_due_dpd")) if ds_row is not None else 0
+    late = _safe_int(ds_row.get("num_late_payments_12m")) if ds_row is not None else 0
+    txn_freq = _safe_int(ds_row.get("txn_frequency_monthly_avg", 20)) if ds_row is not None else 20
+    loan_amt = _safe_float(ds_row.get("loan_amount_requested_inr")) if ds_row is not None else 0
+    revolving = _safe_float(ds_row.get("revolving_credit_balance_inr")) if ds_row is not None else 0
+
+    txns = []
+    # Salary credit
+    txns.append({
+        "id": f"TXN-{borrower_id[-4:]}-01", "category": "salary", "type": "credit",
+        "amount": round(income, 0), "paymentMethod": "bank_transfer",
+        "merchantName": "Employer", "description": "Monthly Salary Credit",
+        "transactionDate": (datetime.now() - timedelta(days=rng.randint(1, 5))).strftime("%Y-%m-%dT%H:%M:%S"),
+        "isStressIndicator": False,
+    })
+    # EMI payment
+    emi = round(income * pti, 0)
+    if emi > 0:
+        is_late = dpd > 0 or late > 0
+        txns.append({
+            "id": f"TXN-{borrower_id[-4:]}-02", "category": "emi_payment", "type": "debit",
+            "amount": emi, "paymentMethod": "auto_debit",
+            "merchantName": "Loan EMI", "description": f"EMI Payment (Loan: {formatINR_py(loan_amt)})" if loan_amt else "EMI Payment",
+            "transactionDate": (datetime.now() - timedelta(days=rng.randint(1, 10))).strftime("%Y-%m-%dT%H:%M:%S"),
+            "isStressIndicator": is_late,
+        })
+    # Rent
+    txns.append({
+        "id": f"TXN-{borrower_id[-4:]}-03", "category": "rent", "type": "debit",
+        "amount": round(income * 0.25, 0), "paymentMethod": "bank_transfer",
+        "merchantName": "Landlord", "description": "Monthly Rent",
+        "transactionDate": (datetime.now() - timedelta(days=rng.randint(1, 5))).strftime("%Y-%m-%dT%H:%M:%S"),
+        "isStressIndicator": False,
+    })
+    # Utility bills
+    txns.append({
+        "id": f"TXN-{borrower_id[-4:]}-04", "category": "utility_bill", "type": "debit",
+        "amount": round(income * 0.05 * rng.uniform(0.8, 1.2), 0), "paymentMethod": "upi",
+        "merchantName": "Utility Provider", "description": "Electricity & Water Bill",
+        "transactionDate": (datetime.now() - timedelta(days=rng.randint(5, 20))).strftime("%Y-%m-%dT%H:%M:%S"),
+        "isStressIndicator": False,
+    })
+    # Groceries (based on txn frequency)
+    n_grocery = min(max(txn_freq // 10, 2), 6)
+    for g in range(n_grocery):
+        txns.append({
+            "id": f"TXN-{borrower_id[-4:]}-G{g}", "category": "grocery", "type": "debit",
+            "amount": round(income * 0.03 * rng.uniform(0.5, 1.5), 0), "paymentMethod": "upi",
+            "merchantName": rng.choice(["BigBasket", "DMart", "More Supermarket", "Local Kirana"]),
+            "description": "Grocery Purchase",
+            "transactionDate": (datetime.now() - timedelta(days=rng.randint(1, 25))).strftime("%Y-%m-%dT%H:%M:%S"),
+            "isStressIndicator": False,
+        })
+    # Revolving credit payment (if any)
+    if revolving > 0:
+        txns.append({
+            "id": f"TXN-{borrower_id[-4:]}-RC", "category": "credit_card_payment", "type": "debit",
+            "amount": round(revolving * 0.05, 0), "paymentMethod": "auto_debit",
+            "merchantName": "Credit Card", "description": f"Min. Due on Revolving Balance ({formatINR_py(revolving)})",
+            "transactionDate": (datetime.now() - timedelta(days=rng.randint(1, 15))).strftime("%Y-%m-%dT%H:%M:%S"),
+            "isStressIndicator": prob > 0.3,
+        })
+    txns.sort(key=lambda x: x["transactionDate"], reverse=True)
+    return txns
+
+
+def formatINR_py(n: float) -> str:
+    if n >= 10000000: return f"{n/10000000:.1f}Cr"
+    if n >= 100000:   return f"{n/100000:.1f}L"
+    if n >= 1000:     return f"{n/1000:.1f}K"
+    return f"{n:.0f}"
+
 
 @router.get("/dashboard/overview")
 async def api_dashboard_overview(authorization: str = Header(default="")):
     info = _parse_token(authorization)
     borrower_id = info.get("borrower_id", "")
 
-    ds  = _get_dataset()
-    row = None
-    if ds is not None and borrower_id and borrower_id in ds["borrower_id"].values:
-        row = ds[ds["borrower_id"] == borrower_id].iloc[0]
+    ds_row, res_row = _get_borrower_full(borrower_id)
 
-    income   = float(row["monthly_net_income_inr"]) if row is not None else 50000.0
-    state_val = str(row["state"])                   if row is not None else "Maharashtra"
-    emp_val  = str(row["employment_type"])          if row is not None else "Salaried"
+    income    = _safe_float(ds_row.get("monthly_net_income_inr", 50000)) if ds_row is not None else 50000.0
+    state_val = str(ds_row["state"]) if ds_row is not None else "Maharashtra"
+    emp_val   = str(ds_row["employment_type"]) if ds_row is not None else "Salaried"
+    dti       = _safe_float(ds_row.get("debt_to_income_ratio", 0.3)) if ds_row is not None else 0.3
+    pti       = _safe_float(ds_row.get("payment_to_income_ratio_pti", 0.2)) if ds_row is not None else 0.2
 
     cs, prob, rc = _get_borrower_score(borrower_id)
     risk_score = _credit_to_risk_score(cs)
     level      = _risk_level_str(prob)
     health     = max(0, min(100, 100 - risk_score))
 
-    expenses   = round(income * (0.65 + prob * 0.2), 0)
-    savings_rt = round(max(0, (income - expenses) / income * 100), 1)
+    # Derive expenses from real debt-to-income and payment-to-income ratios
+    debt_expenses  = round(income * dti, 0)
+    living_expenses = round(income * 0.40, 0)  # rent + groceries + utilities
+    total_expenses = round(debt_expenses + living_expenses, 0)
+    savings_rt     = round(max(0, (income - total_expenses) / max(income, 1) * 100), 1)
+
+    # Balance: income minus expenses accumulated over ~2 months
+    balance = round(max(0, (income - total_expenses) * 2 + income), 0)
 
     return {
         "user": {
@@ -346,9 +668,9 @@ async def api_dashboard_overview(authorization: str = Header(default="")):
             "state":          state_val,
             "employmentType": emp_val,
         },
-        "totalBalance":    round(income * 2.3, 0),
+        "totalBalance":    balance,
         "monthlyIncome":   round(income, 0),
-        "monthlyExpenses": expenses,
+        "monthlyExpenses": total_expenses,
         "savingsRate":     savings_rt,
         "currentRiskScore": {
             "score":               risk_score,
@@ -357,8 +679,8 @@ async def api_dashboard_overview(authorization: str = Header(default="")):
             "confidence":          0.87,
         },
         "riskTrend":          _gen_risk_trend(risk_score),
-        "spendingBreakdown":  _gen_spending(income, prob),
-        "recentTransactions": _gen_transactions(borrower_id, income, prob),
+        "spendingBreakdown":  _real_spending(ds_row, income, prob),
+        "recentTransactions": _real_transactions(borrower_id, ds_row, income, prob),
     }
 
 
@@ -369,10 +691,10 @@ async def api_spending(period: str = "30d", authorization: str = Header(default=
     info = _parse_token(authorization)
     borrower_id = info.get("borrower_id", "")
 
-    ds = _get_dataset()
-    income = 50000.0
-    if ds is not None and borrower_id and borrower_id in ds["borrower_id"].values:
-        income = float(ds[ds["borrower_id"] == borrower_id].iloc[0]["monthly_net_income_inr"])
+    ds_row, _ = _get_borrower_full(borrower_id)
+    income = _safe_float(ds_row.get("monthly_net_income_inr", 50000)) if ds_row is not None else 50000.0
+    dti    = _safe_float(ds_row.get("debt_to_income_ratio", 0.3)) if ds_row is not None else 0.3
+    ic_score = _safe_float(ds_row.get("income_consistency_score", 0.7)) if ds_row is not None else 0.7
 
     _, prob, _ = _get_borrower_score(borrower_id)
 
@@ -380,29 +702,39 @@ async def api_spending(period: str = "30d", authorization: str = Header(default=
     n_days   = days_map.get(period, 30)
     n_weeks  = max(1, n_days // 7)
 
+    # Timeline derived from real income consistency score (variance based on it)
     timeline = []
     rng = random.Random(hash(borrower_id) & 0xFF)
+    variance = max(0.02, 0.15 * (1 - ic_score))  # Low consistency = high variance
+    expense_rate = 0.40 + dti  # living + debt
     for i in range(n_weeks):
-        wk_income  = income / 4 * (1 + rng.uniform(-0.1, 0.1))
-        wk_expense = income / 4 * (0.7 + prob * 0.15) * (1 + rng.uniform(-0.05, 0.1))
+        wk_income  = income / 4 * (1 + rng.uniform(-variance, variance))
+        wk_expense = income / 4 * expense_rate * (1 + rng.uniform(-0.03, 0.05))
         date = (datetime.now() - timedelta(weeks=(n_weeks - i))).strftime("%Y-%m-%d")
-        timeline.append({"date": date, "income": round(wk_income, 0), "expenses": round(wk_expense, 0)})
+        timeline.append({"date": date, "income": round(wk_income, 0), "expenses": round(wk_expense, 0), "spent": round(wk_expense, 0)})
 
-    spending = _gen_spending(income, prob)
+    spending = _real_spending(ds_row, income, prob)
     categories = [
         {
-            "category": s["category"],
-            "total":    s["amount"],
-            "percentage": s["percentage"],
-            "trend":    "up" if s["category"] in ("loan_app", "atm_withdrawal") and prob > 0.2 else "stable",
-            "count":    rng.randint(3, 15),
+            "category":         s["category"],
+            "total":            s["amount"],
+            "amount":           s["amount"],
+            "percentage":       s["percentage"],
+            "trend":            "up" if s["category"] == "emi_payment" and prob > 0.2 else "stable",
+            "count":            rng.randint(1, 8),
+            "transactionCount": rng.randint(1, 8),
         }
         for s in spending
     ]
 
-    total_out = round(income * 0.72 * (n_days / 30), 0)
+    total_out = round(income * expense_rate * (n_days / 30), 0)
     total_in  = round(income * (n_days / 30), 0)
-    return {"timeline": timeline, "categories": categories, "totalOutflow": total_out, "totalInflow": total_in}
+    return {
+        "timeline":    timeline,
+        "categories":  categories,
+        "totalOutflow": total_out, "totalSpent": total_out,
+        "totalInflow":  total_in,  "totalIncome": total_in,
+    }
 
 
 # ── Risk ───────────────────────────────────────────────────────────────
@@ -429,28 +761,71 @@ async def api_risk_explain(authorization: str = Header(default="")):
     cs, prob, _ = _get_borrower_score(borrower_id)
     risk_score  = _credit_to_risk_score(cs)
 
-    top_factors = [
-        {"feature": "emiPaymentRatio",         "impact": round(prob * 18 + 2, 2), "direction": "increases_risk"},
-        {"feature": "loanAppTransactionCount", "impact": round(prob * 14 + 1, 2), "direction": "increases_risk"},
-        {"feature": "balanceDrop4w",           "impact": round(prob * 12 + 1, 2), "direction": "increases_risk"},
-        {"feature": "atmWithdrawalFrequency",  "impact": round(prob * 8  + 1, 2), "direction": "increases_risk"},
+    ds_row, res_row = _get_borrower_full(borrower_id)
+
+    # Build risk factors from REAL data
+    dti    = _safe_float(ds_row.get("debt_to_income_ratio")) if ds_row is not None else 0.3
+    pti    = _safe_float(ds_row.get("payment_to_income_ratio_pti")) if ds_row is not None else 0.2
+    cu     = _safe_float(ds_row.get("credit_utilisation_ratio")) if ds_row is not None else 0.4
+    dpd    = _safe_int(ds_row.get("days_past_due_dpd")) if ds_row is not None else 0
+    late   = _safe_int(ds_row.get("num_late_payments_12m")) if ds_row is not None else 0
+    prev_def = _safe_int(ds_row.get("previous_loan_default_flag")) if ds_row is not None else 0
+    enquiries = _safe_int(ds_row.get("num_hard_enquiries_12m")) if ds_row is not None else 0
+    ltv    = _safe_float(ds_row.get("loan_to_value_ratio_ltv")) if ds_row is not None else 0
+    cibil  = _safe_float(ds_row.get("cibil_bureau_score")) if ds_row is not None else 700
+    ic     = _safe_float(ds_row.get("income_consistency_score")) if ds_row is not None else 0.7
+    ups    = _safe_float(ds_row.get("utility_payment_score")) if ds_row is not None else 60
+    des    = _safe_float(ds_row.get("digital_engagement_score")) if ds_row is not None else 50
+
+    top_factors = []
+    # Rank actual risk drivers by severity
+    risk_items = [
+        ("debtToIncomeRatio",      dti * 30,       f"Debt-to-income ratio: {dti:.0%}"),
+        ("paymentToIncomeRatio",   pti * 25,       f"EMI payments consume {pti:.0%} of income"),
+        ("creditUtilisation",      cu * 20,        f"Credit utilisation at {cu:.0%}"),
+        ("daysPastDue",            min(dpd / 5, 20), f"{dpd} days overdue on payments"),
+        ("latePayments",           late * 3,        f"{late} late payments in last 12 months"),
+        ("previousDefault",        prev_def * 18,   "Previous loan default on record"),
+        ("hardEnquiries",          enquiries * 2,   f"{enquiries} credit enquiries in 12 months"),
+        ("loanToValueRatio",       ltv * 15,        f"Loan-to-value ratio: {ltv:.0%}"),
+        ("lowCibilScore",          max(0, (650 - cibil) / 10), f"CIBIL score: {int(cibil)}"),
     ]
-    protective = [
-        {"feature": "incomeConsistency",    "impact": round((1 - prob) * 12 + 3, 2), "direction": "decreases_risk"},
-        {"feature": "utilityPaymentScore",  "impact": round((1 - prob) * 8  + 2, 2), "direction": "decreases_risk"},
-        {"feature": "digitalEngagement",    "impact": round((1 - prob) * 5  + 1, 2), "direction": "decreases_risk"},
+    risk_items.sort(key=lambda x: -x[1])
+    for feat, impact, desc in risk_items[:5]:
+        if impact > 0.5:
+            top_factors.append({"feature": feat, "impact": round(impact, 2), "direction": "increases_risk", "description": desc})
+
+    protective = []
+    prot_items = [
+        ("incomeConsistency",   ic * 15,   f"Income consistency score: {ic:.0%}"),
+        ("utilityPaymentScore", ups / 8,   f"Utility payment score: {int(ups)}/100"),
+        ("digitalEngagement",   des / 10,  f"Digital engagement score: {int(des)}/100"),
+        ("highCibilScore",      max(0, (cibil - 700) / 20), f"Good CIBIL score: {int(cibil)}"),
     ]
-    recs = [
-        "Maintain EMI payments on time to improve your credit score.",
-        "Reduce ATM cash withdrawals — prefer UPI/digital payments.",
-        "Build an emergency fund of at least 3 months' expenses.",
-        "Avoid multiple loan applications within a short period.",
-    ]
-    if prob < 0.10:
+    prot_items.sort(key=lambda x: -x[1])
+    for feat, impact, desc in prot_items:
+        if impact > 0.5:
+            protective.append({"feature": feat, "impact": round(impact, 2), "direction": "decreases_risk", "description": desc})
+
+    # Personalized recommendations based on actual data
+    recs = []
+    if dpd > 0:
+        recs.append(f"You are {dpd} days overdue — clear pending dues immediately to prevent NPA classification.")
+    if dti > 0.5:
+        recs.append(f"Your debt-to-income ratio is {dti:.0%} — aim to bring it below 40% by paying off smaller loans.")
+    if cu > 0.7:
+        recs.append(f"Credit utilisation is {cu:.0%} — keep it below 30% to improve credit score.")
+    if late > 2:
+        recs.append(f"You had {late} late payments this year — set up auto-debit for all EMIs.")
+    if enquiries >= 4:
+        recs.append(f"You've had {enquiries} credit enquiries — avoid new loan applications for 6 months.")
+    if ltv > 0.8:
+        recs.append(f"Loan-to-value ratio is {ltv:.0%} — consider making a partial prepayment.")
+    if not recs:
         recs = [
-            "Keep up your excellent payment history.",
-            "Consider investing surplus savings in mutual funds.",
-            "Your credit utilisation is optimal — maintain it below 30%.",
+            "Your financial profile is strong — maintain your current habits.",
+            f"CIBIL score of {int(cibil)} is {'excellent' if cibil >= 750 else 'good'} — continue timely payments.",
+            "Consider diversifying savings into SIPs or fixed deposits.",
         ]
 
     level = _risk_level_str(prob)
@@ -507,14 +882,12 @@ async def api_transactions(limit: int = 50, authorization: str = Header(default=
     info = _parse_token(authorization)
     borrower_id = info.get("borrower_id", "")
 
-    ds = _get_dataset()
-    income = 50000.0
-    if ds is not None and borrower_id and borrower_id in ds["borrower_id"].values:
-        income = float(ds[ds["borrower_id"] == borrower_id].iloc[0]["monthly_net_income_inr"])
+    ds_row, _ = _get_borrower_full(borrower_id)
+    income = _safe_float(ds_row.get("monthly_net_income_inr", 50000)) if ds_row is not None else 50000.0
 
     _, prob, _ = _get_borrower_score(borrower_id)
-    txns = _gen_transactions(borrower_id, income, prob)
-    return {"data": txns[:limit], "total": len(txns), "limit": limit, "offset": 0}
+    txns = _real_transactions(borrower_id, ds_row, income, prob)
+    return {"transactions": txns[:limit], "data": txns[:limit], "total": len(txns), "limit": limit, "offset": 0}
 
 
 class SimulateRequest(BaseModel):
@@ -557,9 +930,10 @@ async def api_simulate_txn(req: SimulateRequest, authorization: str = Header(def
         warning = "This transaction will significantly increase your risk score."
 
     return {
-        "projectedScore": projected,
-        "riskDelta":      delta,
-        "warning":        warning,
+        "projectedScore":     projected,
+        "projectedRiskScore": projected,
+        "riskDelta":          delta,
+        "warning":            warning,
         "recommendation": "Consider digital payment alternatives to reduce cash dependency."
                           if req.category == "atm_withdrawal"
                           else "Ensure you have sufficient savings buffer before this expense.",
@@ -579,10 +953,14 @@ async def api_coach(authorization: str = Header(default="")):
     borrower_id = info.get("borrower_id", "")
     cs, prob, _ = _get_borrower_score(borrower_id)
 
-    ds = _get_dataset()
-    income = 50000.0
-    if ds is not None and borrower_id and borrower_id in ds["borrower_id"].values:
-        income = float(ds[ds["borrower_id"] == borrower_id].iloc[0]["monthly_net_income_inr"])
+    ds_row, res_row = _get_borrower_full(borrower_id)
+    income = _safe_float(ds_row.get("monthly_net_income_inr", 50000)) if ds_row is not None else 50000.0
+    dti    = _safe_float(ds_row.get("debt_to_income_ratio", 0.3)) if ds_row is not None else 0.3
+    pti    = _safe_float(ds_row.get("payment_to_income_ratio_pti", 0.2)) if ds_row is not None else 0.2
+    cu     = _safe_float(ds_row.get("credit_utilisation_ratio", 0.4)) if ds_row is not None else 0.4
+    dpd    = _safe_int(ds_row.get("days_past_due_dpd")) if ds_row is not None else 0
+    late   = _safe_int(ds_row.get("num_late_payments_12m")) if ds_row is not None else 0
+    des    = _safe_float(ds_row.get("digital_engagement_score", 50)) if ds_row is not None else 50
 
     level = _risk_level_str(prob)
     msgs = {
@@ -591,30 +969,83 @@ async def api_coach(authorization: str = Header(default="")):
         "medium":   "You're managing reasonably but there's room to improve financial resilience.",
         "low":      "Your financial health is excellent! You're in a great position to grow wealth.",
     }
-    tips = [
-        {"category": "Savings", "title": "Build Emergency Fund",
-         "description": "Aim for 3-6 months of expenses in a liquid savings account.",
-         "potentialSaving": round(income * 0.1, 0), "priority": "high"},
-        {"category": "Debt",    "title": "Reduce EMI Burden",
-         "description": "Keep total EMIs below 40% of monthly income.",
-         "potentialSaving": round(income * 0.05, 0), "priority": "medium"},
-        {"category": "Digital", "title": "Switch to UPI Payments",
-         "description": "Reduce ATM withdrawals — digital payments improve credit profile.",
-         "potentialSaving": round(income * 0.02, 0), "priority": "low"},
-    ]
+
+    # Personalized tips based on actual borrower data
+    tips = []
+    if dti > 0.4:
+        tips.append({
+            "category": "debt", "title": "Reduce Debt-to-Income Ratio",
+            "tip": f"Reduce Debt-to-Income Ratio — Your DTI is {dti:.0%}, target below 40%. Consider consolidating or prepaying smaller loans.",
+            "description": f"Your DTI is {dti:.0%} — target below 40%. Consider consolidating or prepaying smaller loans.",
+            "potentialSaving": round(income * (dti - 0.4), 0), "priority": "high",
+        })
+    if cu > 0.5:
+        tips.append({
+            "category": "spending", "title": "Lower Credit Utilisation",
+            "tip": f"Lower Credit Utilisation — Your utilisation is {cu:.0%}, keeping it under 30% can boost your CIBIL score by 30-50 points.",
+            "description": f"Your utilisation is {cu:.0%} — keeping it under 30% can boost your CIBIL score by 30-50 points.",
+            "potentialSaving": round(income * 0.05, 0), "priority": "high" if cu > 0.7 else "medium",
+        })
+    if dpd > 0:
+        tips.append({
+            "category": "emergency", "title": "Clear Overdue Payments",
+            "tip": f"Clear Overdue Payments — You are {dpd} days past due. Clearing this immediately prevents NPA classification and penalty charges.",
+            "description": f"You are {dpd} days past due. Clearing this immediately prevents NPA classification and penalty charges.",
+            "potentialSaving": round(income * 0.08, 0), "priority": "high",
+        })
+    if late > 0:
+        tips.append({
+            "category": "income", "title": "Set Up Auto-Debit for EMIs",
+            "tip": f"Set Up Auto-Debit for EMIs — You had {late} late payment(s) this year. Auto-debit ensures on-time payments and improves credit history.",
+            "description": f"You had {late} late payment(s) this year. Auto-debit ensures on-time payments and improves credit history.",
+            "potentialSaving": round(income * 0.03, 0), "priority": "medium",
+        })
+    if des < 40:
+        tips.append({
+            "category": "spending", "title": "Increase Digital Payments",
+            "tip": f"Increase Digital Payments — Digital engagement score is {int(des)}/100. Using UPI/net-banking creates a traceable financial footprint.",
+            "description": f"Digital engagement score is {int(des)}/100. Using UPI/net-banking creates a traceable financial footprint.",
+            "potentialSaving": round(income * 0.02, 0), "priority": "low",
+        })
+    # Always ensure at least one tip
+    if not tips:
+        tips.append({
+            "category": "savings", "title": "Build Emergency Fund",
+            "tip": "Build Emergency Fund — You're in great shape! Invest surplus in SIPs or FDs for wealth creation.",
+            "description": "You're in great shape! Invest surplus in SIPs or FDs for wealth creation.",
+            "potentialSaving": round(income * 0.15, 0), "priority": "low",
+        })
+
     flags = []
+    if dpd > 90:
+        flags.append(f"CRITICAL: {dpd} days past due — NPA classification imminent")
+    elif dpd > 30:
+        flags.append(f"WARNING: {dpd} days overdue — clear immediately")
+    if dti > 0.6:
+        flags.append(f"Debt-to-income ratio of {dti:.0%} is dangerously high")
     if prob >= 0.30:
-        flags = ["High default risk — consider debt counselling immediately"]
-    elif prob >= 0.10:
-        flags = ["Moderate risk — review monthly spending patterns"]
+        flags.append("High default probability — consider debt counselling")
+    elif prob >= 0.10 and not flags:
+        flags.append("Moderate risk — review monthly spending patterns")
+
+    # Goal derived from actual weakest area
+    if dti > 0.4:
+        goal_focus = f"Reduce debt burden from {dti:.0%} to below 40%"
+    elif cu > 0.5:
+        goal_focus = f"Bring credit utilisation from {cu:.0%} to below 30%"
+    elif dpd > 0:
+        goal_focus = "Clear all overdue payments this month"
+    else:
+        goal_focus = "Maintain financial discipline and grow savings"
+
+    savings_opp = round(income * max(0.05, (1 - dti - 0.40)), 0) if dti < 0.60 else round(income * 0.05, 0)
 
     return {
         "overallMessage":     msgs[level],
         "warningFlags":       flags,
-        "tips":               tips,
-        "monthlyGoal":        {"focus": "Reduce discretionary spending by 10%",
-                               "progress": round((1 - prob) * 70, 1)},
-        "savingsOpportunity": round(income * max(0.05, 0.15 - prob * 0.1), 0),
+        "tips":               tips[:4],
+        "monthlyGoal":        goal_focus,
+        "savingsOpportunity": max(savings_opp, 0),
     }
 
 
@@ -796,7 +1227,23 @@ async def api_risk_distribution():
             "highRiskCount": max(0, base_high + rng.randint(-200, 200)),
         })
 
-    return {"byEmploymentType": by_emp_type, "byCity": by_city, "trendOverTime": trend}
+    # byLevel — risk tier counts for pie chart
+    by_level = []
+    total = len(results)
+    high_count = int((results["risk_category"] == "HIGH").sum())
+    med_count  = int((results["risk_category"] == "MEDIUM").sum())
+    low_count  = total - high_count - med_count
+    # Split HIGH into critical (prob >= 0.50) and high (prob >= 0.30)
+    critical_count = int((results["default_probability"] >= 0.50).sum())
+    high_only = high_count - critical_count
+    by_level = [
+        {"level": "low",      "count": low_count},
+        {"level": "medium",   "count": med_count},
+        {"level": "high",     "count": max(high_only, 0)},
+        {"level": "critical", "count": critical_count},
+    ]
+
+    return {"byEmploymentType": by_emp_type, "byCity": by_city, "trendOverTime": trend, "byLevel": by_level}
 
 
 @router.get("/admin/alerts")
@@ -831,7 +1278,14 @@ async def api_admin_users(search: str = "", riskLevel: str = "", limit: int = 50
 
     df = results.copy()
     if riskLevel and riskLevel != "all":
-        df = df[df["risk_category"] == riskLevel.upper()]
+        if riskLevel == "critical":
+            df = df[df["default_probability"] >= 0.50]
+        elif riskLevel == "high":
+            df = df[df["risk_category"] == "HIGH"]
+        elif riskLevel == "medium":
+            df = df[df["risk_category"] == "MEDIUM"]
+        elif riskLevel == "low":
+            df = df[df["risk_category"] == "LOW"]
 
     users = []
     for _, row in df.head(limit).iterrows():
@@ -863,6 +1317,190 @@ async def api_admin_users(search: str = "", riskLevel: str = "", limit: int = 50
     return {"users": users, "total": total_users, "page": 1, "totalPages": total_pages}
 
 
+# ── Excel Export ──────────────────────────────────────────────────────
+
+def _safe_float(val, default=0.0) -> float:
+    """Safely convert to float, handling NaN/None."""
+    try:
+        v = float(val)
+        return default if (v != v) else v  # NaN check: NaN != NaN
+    except (TypeError, ValueError):
+        return default
+
+
+def _safe_int(val, default=0) -> int:
+    """Safely convert to int, handling NaN/None."""
+    try:
+        v = float(val)
+        return default if (v != v) else int(v)
+    except (TypeError, ValueError):
+        return default
+
+
+def _generate_risk_reasons(row: pd.Series, dataset_row: Optional[pd.Series] = None) -> str:
+    """Generate human-readable risk reasons based on borrower data."""
+    reasons = []
+    prob = _safe_float(row.get("default_probability", 0))
+
+    # Credit score analysis
+    cibil = _safe_float(dataset_row.get("cibil_bureau_score")) if dataset_row is not None else 0
+    if cibil > 0 and cibil < 500:
+        reasons.append(f"Very low CIBIL score ({int(cibil)})")
+    elif cibil > 0 and cibil < 650:
+        reasons.append(f"Below-average CIBIL score ({int(cibil)})")
+
+    # Days past due
+    dpd = _safe_int(dataset_row.get("days_past_due_dpd")) if dataset_row is not None else 0
+    if dpd > 90:
+        reasons.append(f"Severely overdue payments ({dpd} days past due)")
+    elif dpd > 30:
+        reasons.append(f"Overdue payments ({dpd} days past due)")
+
+    # Debt to income
+    dti = _safe_float(dataset_row.get("debt_to_income_ratio")) if dataset_row is not None else 0
+    if dti > 0.6:
+        reasons.append(f"Very high debt-to-income ratio ({dti:.0%})")
+    elif dti > 0.4:
+        reasons.append(f"Elevated debt-to-income ratio ({dti:.0%})")
+
+    # Previous defaults
+    prev_default = _safe_int(dataset_row.get("previous_loan_default_flag")) if dataset_row is not None else 0
+    if prev_default:
+        reasons.append("Previous loan default on record")
+
+    # Late payments
+    late = _safe_int(dataset_row.get("num_late_payments_12m")) if dataset_row is not None else 0
+    if late >= 5:
+        reasons.append(f"Frequent late payments ({late} in last 12 months)")
+    elif late >= 2:
+        reasons.append(f"Multiple late payments ({late} in last 12 months)")
+
+    # Credit utilisation
+    cu = _safe_float(dataset_row.get("credit_utilisation_ratio")) if dataset_row is not None else 0
+    if cu > 0.8:
+        reasons.append(f"Very high credit utilisation ({cu:.0%})")
+
+    # Stress stage
+    stress = str(row.get("stress_stage_label", ""))
+    if stress == "NPA":
+        reasons.append("Classified as Non-Performing Asset (NPA)")
+    elif stress in ("Delinquency", "Early Stress"):
+        reasons.append(f"Stress stage: {stress}")
+
+    # Behavioral deterioration
+    bd = _safe_int(row.get("behavioral_deterioration"))
+    if bd >= 3:
+        reasons.append(f"Significant behavioral deterioration (score: {bd})")
+
+    # EMI stress
+    emi_stress = _safe_int(row.get("emi_stress"))
+    if emi_stress:
+        reasons.append("EMI stress detected")
+
+    # Hard enquiries
+    enquiries = _safe_int(dataset_row.get("num_hard_enquiries_12m")) if dataset_row is not None else 0
+    if enquiries >= 5:
+        reasons.append(f"Excessive credit enquiries ({enquiries} in 12 months)")
+
+    # High LTV
+    ltv = _safe_float(dataset_row.get("loan_to_value_ratio_ltv")) if dataset_row is not None else 0
+    if ltv > 0.8:
+        reasons.append(f"High loan-to-value ratio ({ltv:.0%})")
+
+    if not reasons:
+        if prob >= 0.30:
+            reasons.append("Composite risk factors exceed HIGH threshold")
+        elif prob >= 0.10:
+            reasons.append("Moderate risk profile based on combined factors")
+        else:
+            reasons.append("Low risk — no significant risk indicators")
+
+    return "; ".join(reasons)
+
+
+@router.get("/admin/export-excel")
+async def api_admin_export_excel(riskLevel: str = ""):
+    """Export all borrower data as an Excel file with risk reasons."""
+    results = _reload_results()
+    ds = _get_dataset()
+    if results is None:
+        raise HTTPException(404, "No batch results available. Run batch scoring first.")
+
+    df = results.copy()
+
+    # Filter by risk level if specified
+    if riskLevel and riskLevel != "all":
+        if riskLevel == "critical":
+            df = df[df["default_probability"] >= 0.50]
+        elif riskLevel == "high":
+            df = df[df["risk_category"] == "HIGH"]
+        elif riskLevel == "medium":
+            df = df[df["risk_category"] == "MEDIUM"]
+        elif riskLevel == "low":
+            df = df[df["risk_category"] == "LOW"]
+
+    # Merge with original dataset for full details
+    if ds is not None:
+        merge_cols = [c for c in ds.columns if c != "borrower_id"]
+        # Avoid duplicate columns
+        existing = set(df.columns) - {"borrower_id"}
+        new_cols = ["borrower_id"] + [c for c in merge_cols if c not in existing]
+        df = df.merge(ds[new_cols], on="borrower_id", how="left")
+
+    # Build the export rows directly from merged data
+    export_rows = []
+    for _, row in df.iterrows():
+        bid = str(row["borrower_id"])
+        prob = _safe_float(row.get("default_probability"))
+        cs = _safe_float(row.get("credit_score"))
+        inc = _safe_float(row.get("monthly_net_income_inr"))
+        cibil = _safe_float(row.get("cibil_bureau_score"))
+        age = _safe_int(row.get("borrower_age"))
+
+        export_rows.append({
+            "Borrower ID": bid,
+            "Name": f"Borrower {bid[-4:]}",
+            "Email": f"{bid.lower()}@example.com",
+            "Phone": f"+91-{abs(hash(bid)) % 9000000000 + 1000000000}",
+            "State": str(row.get("state", "N/A")),
+            "Age": age if age > 0 else "N/A",
+            "Employment Type": str(row.get("employment_type", "N/A")),
+            "Borrower Segment": str(row.get("borrower_segment", "N/A")).replace("_", " ").title(),
+            "Monthly Income (INR)": round(inc, 2),
+            "Loan Type": str(row.get("loan_type", "N/A")),
+            "Loan Amount (INR)": _safe_float(row.get("loan_amount_requested_inr")),
+            "CIBIL Score": round(cibil) if cibil > 0 else "N/A",
+            "Credit Score (Model)": round(cs, 1),
+            "Default Probability": round(prob, 4),
+            "Risk Category": str(row.get("risk_category", "N/A")),
+            "Stress Stage": str(row.get("stress_stage_label", "N/A")),
+            "EMI Stress": "Yes" if _safe_int(row.get("emi_stress")) else "No",
+            "Expected Loss (INR)": round(_safe_float(row.get("expected_loss_inr")), 2),
+            "Risk Reasons": _generate_risk_reasons(row, row),
+        })
+
+    export_df = pd.DataFrame(export_rows)
+
+    # Write to Excel in memory
+    output = io.BytesIO()
+    with pd.ExcelWriter(output, engine="openpyxl") as writer:
+        export_df.to_excel(writer, index=False, sheet_name="Borrower Risk Report")
+
+        # Auto-adjust column widths
+        ws = writer.sheets["Borrower Risk Report"]
+        for col_idx, col in enumerate(export_df.columns, 1):
+            max_len = max(len(str(col)), export_df[col].astype(str).str.len().max())
+            ws.column_dimensions[ws.cell(row=1, column=col_idx).column_letter].width = min(max_len + 2, 50)
+
+    output.seek(0)
+    filename = f"credit_risk_report_{datetime.now().strftime('%Y%m%d_%H%M%S')}.xlsx"
+    return StreamingResponse(
+        output,
+        media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        headers={"Content-Disposition": f"attachment; filename={filename}"},
+    )
+
+
 @router.get("/admin/users/{user_id}")
 async def api_admin_user_detail(user_id: str):
     results = _reload_results()
@@ -877,45 +1515,129 @@ async def api_admin_user_detail(user_id: str):
     if row is None:
         raise HTTPException(404, f"User {user_id} not found")
 
-    cs   = float(row["credit_score"])
-    prob = float(row["default_probability"])
-    inc  = float(row.get("monthly_net_income_inr", 40000))
+    cs   = _safe_float(row["credit_score"])
+    prob = _safe_float(row["default_probability"])
+    inc  = _safe_float(row.get("monthly_net_income_inr"), 40000)
     emp  = str(row.get("employment_type", "Salaried"))
     state = str(row.get("state", "Maharashtra"))
+    risk_score = _credit_to_risk_score(cs)
+    risk_level = _risk_level_str(prob)
+    rng = random.Random(hash(user_id) & 0xFFFF)
 
-    profile = None
+    # Merge dataset columns for richer profile
+    cibil = _safe_float(row.get("cibil_bureau_score"), 650)
+    dpd = int(_safe_float(row.get("days_past_due_dpd"), 0))
+    loan_amount = _safe_float(row.get("loan_amount_requested_inr"), 0)
+    dti = 0.3
+    cu = 0.4
+    loan_type = str(row.get("loan_type", "Personal"))
+    segment = str(row.get("borrower_segment", "salaried_urban"))
+    age = int(_safe_float(row.get("borrower_age"), 30))
+
     if ds is not None:
         dr = ds[ds["borrower_id"] == user_id]
         if not dr.empty:
             d = dr.iloc[0]
-            profile = {
-                "cibilScore":          float(d.get("cibil_bureau_score", 650)),
-                "daysPassDue":         int(d.get("days_past_due_dpd", 0)),
-                "loanAmount":          float(d.get("loan_amount_requested_inr", 0)),
-                "debtToIncome":        float(d.get("debt_to_income_ratio", 0.3)),
-                "creditUtilisation":   float(d.get("credit_utilisation_ratio", 0.4)),
-                "loanType":            str(d.get("loan_type", "Personal")),
-                "borrowerSegment":     str(d.get("borrower_segment", "salaried_urban")),
-            }
+            cibil = _safe_float(d.get("cibil_bureau_score"), cibil)
+            dpd = int(_safe_float(d.get("days_past_due_dpd"), dpd))
+            loan_amount = _safe_float(d.get("loan_amount_requested_inr"), loan_amount)
+            dti = _safe_float(d.get("debt_to_income_ratio"), dti)
+            cu = _safe_float(d.get("credit_utilisation_ratio"), cu)
+            loan_type = str(d.get("loan_type", loan_type))
+            segment = str(d.get("borrower_segment", segment))
+            age = int(_safe_float(d.get("borrower_age"), age))
+
+    # ── Build profile (matches frontend expectations) ──
+    created_at = (datetime.now() - timedelta(days=rng.randint(60, 365))).isoformat()
+    health_score = max(10, min(95, 100 - risk_score + rng.randint(-5, 5)))
+    phone_num = f"+91-{abs(hash(user_id)) % 9000000000 + 1000000000}"
+
+    profile = {
+        "id": user_id,
+        "name": f"Borrower {user_id[-4:]}",
+        "email": f"{user_id.lower()}@example.com",
+        "phone": phone_num,
+        "city": state.split()[0],
+        "state": state,
+        "pincode": str(100000 + abs(hash(state)) % 900000),
+        "employmentType": emp,
+        "monthlyIncome": inc,
+        "riskScore": risk_score,
+        "riskLevel": risk_level,
+        "financialHealthScore": health_score,
+        "creditScore": cs,
+        "defaultProbability": prob,
+        "riskCategory": str(row.get("risk_category", "MEDIUM")) if not pd.isna(row.get("risk_category", "MEDIUM")) else "MEDIUM",
+        "stressStage": int(_safe_float(row.get("stress_stage"), 0)),
+        "cibilScore": cibil,
+        "daysPassDue": dpd,
+        "loanAmount": loan_amount,
+        "debtToIncome": dti,
+        "creditUtilisation": cu,
+        "loanType": loan_type,
+        "borrowerSegment": segment,
+        "age": age,
+        "isActive": True,
+        "createdAt": created_at,
+        "lastLoginAt": (datetime.now() - timedelta(hours=rng.randint(1, 72))).isoformat(),
+    }
+
+    # ── Risk history (array of snapshots) ──
+    raw_trend = _gen_risk_trend(risk_score, n=10)
+    risk_history = []
+    segments = ["cautious_spender", "steady_borrower", "impulsive_spender", "high_risk_borrower"]
+    for i, pt in enumerate(reversed(raw_trend)):
+        h_score = max(10, min(95, 100 - pt["score"] + rng.randint(-3, 3)))
+        risk_history.append({
+            "id": f"RSK-{user_id[-4:]}-{i:02d}",
+            "predictedAt": pt["date"] + "T10:00:00",
+            "score": pt["score"],
+            "financialHealthScore": h_score,
+            "level": _risk_level_str(pt["score"] / 100),
+            "confidence": round(0.80 + rng.random() * 0.18, 2),
+            "behaviorSegment": rng.choice(segments),
+        })
+
+    # ── Transactions ──
+    transactions = _gen_transactions(user_id, inc, prob)
+
+    # ── Alerts ──
+    alerts = _gen_alerts(user_id, risk_score / 100, prob)
+
+    # ── Interventions for this user ──
+    _ensure_seed_interventions()
+    user_interventions = [iv for iv in _interventions if iv.get("userId") == user_id]
+
+    # ── Spending by category ──
+    spending_by_category = _gen_spending(inc, prob)
+
+    # ── Summary stats ──
+    total_debits = sum(t["amount"] for t in transactions if t["type"] == "debit")
+    total_credits = sum(t["amount"] for t in transactions if t["type"] == "credit")
+    stress_txns = sum(1 for t in transactions if t.get("isStressIndicator"))
+    unread_alerts = sum(1 for a in alerts if not a.get("isRead"))
+    active_interventions = sum(1 for iv in user_interventions if iv.get("status") in ("active", "pending"))
+    prev_score = raw_trend[-2]["score"] if len(raw_trend) >= 2 else risk_score
+    score_change = round(risk_score - prev_score, 1)
+
+    summary = {
+        "riskScoreChange": score_change,
+        "totalTransactions": len(transactions),
+        "stressTransactions": stress_txns,
+        "unreadAlerts": unread_alerts,
+        "activeInterventions": active_interventions,
+        "totalDebits": total_debits,
+        "totalCredits": total_credits,
+    }
 
     return {
-        "id":             user_id,
-        "name":           f"Borrower {user_id[-4:]}",
-        "email":          f"{user_id.lower()}@example.com",
-        "city":           state.split()[0],
-        "state":          state,
-        "employmentType": emp,
-        "monthlyIncome":  inc,
-        "riskScore":      _credit_to_risk_score(cs),
-        "riskLevel":      _risk_level_str(prob),
-        "creditScore":    cs,
-        "defaultProbability": prob,
-        "riskCategory":   str(row["risk_category"]),
-        "stressStage":    int(row.get("stress_stage", 0)),
-        "profile":        profile,
-        "riskTrend":      _gen_risk_trend(_credit_to_risk_score(cs)),
-        "alerts":         _gen_alerts(user_id, _credit_to_risk_score(cs) / 100, prob),
-        "transactions":   _gen_transactions(user_id, inc, prob)[:5],
+        "profile": profile,
+        "riskHistory": risk_history,
+        "transactions": transactions,
+        "alerts": alerts,
+        "interventions": user_interventions,
+        "spendingByCategory": spending_by_category,
+        "summary": summary,
     }
 
 

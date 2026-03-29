@@ -115,6 +115,10 @@ export function AppSidebar() {
           variant="ghost" 
           className="w-full justify-start text-muted-foreground hover:text-destructive hover:bg-destructive/10 rounded-xl"
           onClick={() => {
+            fetch("/api/auth/logout", {
+              method: "POST",
+              headers: { Authorization: `Bearer ${useAuthStore.getState().token}` },
+            }).catch(() => {})
             logout()
             window.location.href = '/'
           }}

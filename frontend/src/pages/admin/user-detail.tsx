@@ -11,7 +11,8 @@ import {
   ArrowLeft, User, MapPin, Briefcase, Phone, Mail, Calendar,
   TrendingUp, TrendingDown, AlertTriangle, CheckCircle2, Clock,
   Zap, ShieldAlert, Activity, CreditCard, Bell, FileText,
-  ChevronDown, ChevronUp, IndianRupee, BarChart2
+  ChevronDown, ChevronUp, IndianRupee, BarChart2, Shield,
+  Percent, Landmark, Hash, Gauge
 } from "lucide-react"
 import {
   ResponsiveContainer, LineChart, Line, XAxis, YAxis, Tooltip,
@@ -153,7 +154,7 @@ export default function AdminUserDetail() {
         ))}
       </div>
 
-      {/* Profile Details + Spending Breakdown */}
+      {/* Profile Details + Risk & Credit Metrics + Spending Breakdown */}
       <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
         <Card className="glass-panel p-6">
           <h3 className="font-semibold mb-4 flex items-center gap-2"><User className="w-4 h-4 text-primary" />Profile Details</h3>
@@ -161,9 +162,11 @@ export default function AdminUserDetail() {
             {[
               { icon: <Mail className="w-3.5 h-3.5" />, label: 'Email', value: profile.email },
               { icon: <Phone className="w-3.5 h-3.5" />, label: 'Phone', value: profile.phone || '—' },
-              { icon: <MapPin className="w-3.5 h-3.5" />, label: 'Location', value: [profile.city, profile.state, profile.pincode].filter(Boolean).join(', ') },
+              { icon: <MapPin className="w-3.5 h-3.5" />, label: 'Location', value: [profile.state, profile.pincode].filter(Boolean).join(', ') },
+              { icon: <User className="w-3.5 h-3.5" />, label: 'Age', value: profile.age ? `${profile.age} years` : '—' },
               { icon: <Briefcase className="w-3.5 h-3.5" />, label: 'Employment', value: profile.employmentType?.replace(/_/g, ' ') || '—' },
               { icon: <IndianRupee className="w-3.5 h-3.5" />, label: 'Monthly Income', value: formatINR(profile.monthlyIncome) },
+              { icon: <Hash className="w-3.5 h-3.5" />, label: 'Segment', value: profile.borrowerSegment?.replace(/_/g, ' ') || '—' },
               { icon: <Calendar className="w-3.5 h-3.5" />, label: 'Member Since', value: new Date(profile.createdAt).toLocaleDateString('en-IN', { day: 'numeric', month: 'long', year: 'numeric' }) },
               { icon: <Clock className="w-3.5 h-3.5" />, label: 'Last Login', value: profile.lastLoginAt ? new Date(profile.lastLoginAt).toLocaleDateString('en-IN', { day: 'numeric', month: 'short', year: 'numeric' }) : 'Never' },
             ].map(row => (
@@ -182,7 +185,32 @@ export default function AdminUserDetail() {
         </Card>
 
         <Card className="glass-panel p-6 lg:col-span-2">
-          <h3 className="font-semibold mb-4 flex items-center gap-2"><BarChart2 className="w-4 h-4 text-primary" />Spending by Category</h3>
+          <h3 className="font-semibold mb-4 flex items-center gap-2"><Shield className="w-4 h-4 text-primary" />Risk & Credit Metrics</h3>
+          <div className="grid grid-cols-2 sm:grid-cols-3 gap-4">
+            {[
+              { label: 'CIBIL Score', value: profile.cibilScore != null ? Math.round(profile.cibilScore) : '—', icon: <Gauge className="w-4 h-4 text-info" />, color: profile.cibilScore >= 700 ? 'text-success' : profile.cibilScore >= 500 ? 'text-warning' : 'text-destructive' },
+              { label: 'Credit Score (Model)', value: profile.creditScore != null ? profile.creditScore.toFixed(1) : '—', icon: <Activity className="w-4 h-4 text-primary" />, color: 'text-foreground' },
+              { label: 'Default Probability', value: profile.defaultProbability != null ? `${(profile.defaultProbability * 100).toFixed(1)}%` : '—', icon: <AlertTriangle className="w-4 h-4 text-destructive" />, color: profile.defaultProbability >= 0.5 ? 'text-destructive' : profile.defaultProbability >= 0.3 ? 'text-warning' : 'text-success' },
+              { label: 'Risk Category', value: profile.riskCategory || '—', icon: <ShieldAlert className="w-4 h-4 text-warning" />, color: profile.riskCategory === 'HIGH' ? 'text-destructive' : profile.riskCategory === 'MEDIUM' ? 'text-warning' : 'text-success' },
+              { label: 'Stress Stage', value: profile.stressStage != null ? `Stage ${profile.stressStage}` : '—', icon: <Zap className="w-4 h-4 text-warning" />, color: profile.stressStage >= 3 ? 'text-destructive' : profile.stressStage >= 1 ? 'text-warning' : 'text-success' },
+              { label: 'Days Past Due', value: profile.daysPassDue != null ? `${profile.daysPassDue} days` : '—', icon: <Clock className="w-4 h-4 text-destructive" />, color: profile.daysPassDue > 90 ? 'text-destructive' : profile.daysPassDue > 0 ? 'text-warning' : 'text-success' },
+              { label: 'Loan Type', value: profile.loanType || '—', icon: <Landmark className="w-4 h-4 text-info" />, color: 'text-foreground' },
+              { label: 'Loan Amount', value: profile.loanAmount ? formatINR(profile.loanAmount) : '—', icon: <IndianRupee className="w-4 h-4 text-info" />, color: 'text-foreground' },
+              { label: 'Debt-to-Income', value: profile.debtToIncome != null ? `${(profile.debtToIncome * 100).toFixed(1)}%` : '—', icon: <Percent className="w-4 h-4 text-warning" />, color: profile.debtToIncome > 0.5 ? 'text-destructive' : profile.debtToIncome > 0.3 ? 'text-warning' : 'text-success' },
+              { label: 'Credit Utilisation', value: profile.creditUtilisation != null ? `${(profile.creditUtilisation * 100).toFixed(1)}%` : '—', icon: <CreditCard className="w-4 h-4 text-warning" />, color: profile.creditUtilisation > 0.7 ? 'text-destructive' : profile.creditUtilisation > 0.4 ? 'text-warning' : 'text-success' },
+            ].map(metric => (
+              <div key={metric.label} className="p-3 rounded-xl bg-secondary/20 border border-border/30">
+                <div className="flex items-center gap-1.5 mb-1.5">{metric.icon}<span className="text-[10px] font-semibold text-muted-foreground uppercase tracking-wide">{metric.label}</span></div>
+                <div className={`text-lg font-display font-bold ${metric.color}`}>{metric.value}</div>
+              </div>
+            ))}
+          </div>
+        </Card>
+      </div>
+
+      {/* Spending Breakdown */}
+      <Card className="glass-panel p-6">
+        <h3 className="font-semibold mb-4 flex items-center gap-2"><BarChart2 className="w-4 h-4 text-primary" />Spending by Category</h3>
           {spendingByCategory.length > 0 ? (
             <div className="flex gap-4 items-center">
               <div className="h-[180px] w-[180px] shrink-0">
@@ -191,7 +219,7 @@ export default function AdminUserDetail() {
                     <Pie data={spendingByCategory} cx="50%" cy="50%" innerRadius={52} outerRadius={82} paddingAngle={2} dataKey="amount" stroke="none">
                       {spendingByCategory.map((_: any, i: number) => <Cell key={i} fill={CAT_COLORS[i % CAT_COLORS.length]} />)}
                     </Pie>
-                    <Tooltip contentStyle={{ backgroundColor: 'hsl(var(--card))', border: '1px solid hsl(var(--border))', borderRadius: '8px', fontSize: '11px' }} formatter={(v: number) => [formatINR(v), 'Spent']} />
+                    <Tooltip contentStyle={{ backgroundColor: 'hsl(var(--card))', border: '1px solid hsl(var(--border))', borderRadius: '8px', fontSize: '11px', color: 'hsl(var(--card-foreground))' }} formatter={(v: number) => [formatINR(v), 'Spent']} />
                   </PieChart>
                 </ResponsiveContainer>
               </div>
@@ -213,8 +241,7 @@ export default function AdminUserDetail() {
             <div><p className="text-muted-foreground">Total Credits</p><p className="font-mono font-bold text-success">{formatINR(summary.totalCredits)}</p></div>
             <div><p className="text-muted-foreground">Net Flow</p><p className={`font-mono font-bold ${summary.totalCredits - summary.totalDebits >= 0 ? 'text-success' : 'text-destructive'}`}>{formatINR(Math.abs(summary.totalCredits - summary.totalDebits))}</p></div>
           </div>
-        </Card>
-      </div>
+      </Card>
 
       {/* Risk Score History Chart */}
       <Card className="glass-panel p-6">
@@ -241,7 +268,7 @@ export default function AdminUserDetail() {
                 <XAxis dataKey="date" tick={{ fontSize: 10, fill: 'hsl(var(--muted-foreground))' }} />
                 <YAxis domain={[0, 100]} tick={{ fontSize: 10, fill: 'hsl(var(--muted-foreground))' }} />
                 <Tooltip
-                  contentStyle={{ backgroundColor: 'hsl(var(--card))', border: '1px solid hsl(var(--border))', borderRadius: '8px', fontSize: '11px' }}
+                  contentStyle={{ backgroundColor: 'hsl(var(--card))', border: '1px solid hsl(var(--border))', borderRadius: '8px', fontSize: '11px', color: 'hsl(var(--card-foreground))' }}
                   formatter={(v: number, name: string) => [v, name === 'score' ? 'Risk Score' : 'Health Score']}
                 />
                 <ReferenceLine y={60} stroke="hsl(346 84% 61%)" strokeDasharray="4 4" opacity={0.4} label={{ value: 'High Risk', position: 'right', fontSize: 9, fill: 'hsl(346 84% 61%)' }} />

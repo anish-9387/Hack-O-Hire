@@ -1,5 +1,5 @@
 import { useState } from "react"
-import { useGetAdminOverview, useGetHighRiskUsers, useGetCityAnalytics, useGetAdminAlerts, useGetRiskDistribution, useCreateIntervention } from "@/lib/api-client"
+import { useGetAdminOverview, useGetHighRiskUsers, useGetCityAnalytics, useGetAdminAlerts, useGetRiskDistribution, useCreateIntervention, exportExcel } from "@/lib/api-client"
 import { formatINR, getRiskColor, getRiskColorHex } from "@/lib/utils"
 import { Card } from "@/components/ui/card"
 import { Badge } from "@/components/ui/badge"
@@ -7,7 +7,7 @@ import { Button } from "@/components/ui/button"
 import { Skeleton } from "@/components/ui/skeleton"
 import {
   Users, Shield, AlertTriangle, Activity, MapPin, CheckCircle2,
-  Clock, RefreshCw, BellRing, Zap, BarChart3, ChevronRight, Target, Brain
+  Clock, RefreshCw, BellRing, Zap, BarChart3, ChevronRight, Target, Brain, Download
 } from "lucide-react"
 import { 
   ResponsiveContainer, BarChart, Bar, XAxis, YAxis, Tooltip, CartesianGrid,
@@ -29,6 +29,7 @@ export default function AdminDashboard() {
   const [, setLocation] = useLocation()
   const qc = useQueryClient()
   const [creating, setCreating] = useState<string | null>(null)
+  const [exporting, setExporting] = useState(false)
 
   const { data: overview, isLoading, refetch } = useGetAdminOverview()
   const { data: highRiskRaw } = useGetHighRiskUsers({ limit: 8 })
@@ -95,6 +96,24 @@ export default function AdminDashboard() {
               <BellRing className="w-3 h-3 mr-1.5" />{alertList.length} Critical Alerts
             </Badge>
           )}
+          <Button
+            variant="outline"
+            size="sm"
+            className="border-border/50 bg-secondary/20 hover:bg-secondary/40 rounded-xl"
+            disabled={exporting}
+            onClick={async () => {
+              setExporting(true)
+              try {
+                await exportExcel()
+              } catch (err) {
+                console.error("Excel export error:", err)
+              } finally {
+                setExporting(false)
+              }
+            }}
+          >
+            <Download className="w-3.5 h-3.5 mr-2" />{exporting ? "Exporting..." : "Export Excel"}
+          </Button>
           <Button variant="outline" size="sm" className="border-border/50 bg-secondary/20 hover:bg-secondary/40 rounded-xl" onClick={() => refetch()}>
             <RefreshCw className="w-3.5 h-3.5 mr-2" />Refresh
           </Button>
@@ -108,7 +127,7 @@ export default function AdminDashboard() {
       {/* KPI Cards */}
       <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
         {[
-          { label: 'Total Users', value: totalUsers, icon: <Users className="w-5 h-5 text-info" />, bg: 'bg-info/10', sub: `${cityNames.length} cities · India` },
+          { label: 'Total Users', value: totalUsers, icon: <Users className="w-5 h-5 text-info" />, bg: 'bg-info/10', sub: `${cityNames.length} states · India` },
           { label: 'High Risk Users', value: highRiskCount, icon: <AlertTriangle className="w-5 h-5 text-destructive" />, bg: 'bg-destructive/10', sub: totalUsers > 0 ? `${Math.round((highRiskCount / totalUsers) * 100)}% of portfolio` : '—' },
           { label: 'Active Alerts', value: ov.activeAlerts ?? 0, icon: <BellRing className="w-5 h-5 text-warning" />, bg: 'bg-warning/10', sub: 'Require review' },
           { label: 'Avg Risk Score', value: ov.averageRiskScore ?? 0, icon: <Activity className="w-5 h-5 text-primary" />, bg: 'bg-primary/10', sub: 'Stable trend' },
@@ -135,7 +154,7 @@ export default function AdminDashboard() {
                 <Pie data={riskDistData} cx="50%" cy="50%" innerRadius={45} outerRadius={72} paddingAngle={3} dataKey="value" stroke="none">
                   {riskDistData.map((entry, i) => <Cell key={i} fill={entry.color} />)}
                 </Pie>
-                <Tooltip contentStyle={{ backgroundColor: 'hsl(var(--card))', border: '1px solid hsl(var(--border))', borderRadius: '8px', fontSize: '12px' }} />
+                <Tooltip contentStyle={{ backgroundColor: 'hsl(var(--card))', border: '1px solid hsl(var(--border))', borderRadius: '8px', fontSize: '12px', color: 'hsl(var(--card-foreground))' }} />
               </PieChart>
             </ResponsiveContainer>
           </div>
@@ -224,7 +243,7 @@ export default function AdminDashboard() {
                   </td>
                   <td className="py-3 px-3 text-sm">
                     <div className="flex items-center gap-1.5 text-muted-foreground">
-                      <MapPin className="w-3 h-3" />{user.city}
+                      <MapPin className="w-3 h-3" />{user.state || user.city}
                     </div>
                   </td>
                   <td className="py-3 px-3 text-center">
@@ -258,7 +277,7 @@ export default function AdminDashboard() {
       <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
         <Card className="glass-panel p-6">
           <div className="flex items-center justify-between mb-4">
-            <h3 className="font-semibold flex items-center gap-2"><MapPin className="w-4 h-4 text-primary" />City-wise Risk Analytics</h3>
+            <h3 className="font-semibold flex items-center gap-2"><MapPin className="w-4 h-4 text-primary" />State-wise Risk Analytics</h3>
             <Button variant="ghost" size="sm" className="text-xs text-primary h-7 hover:bg-primary/10" onClick={() => setLocation('/admin/risk')}>Full View →</Button>
           </div>
           <div className="h-[200px]">
@@ -280,7 +299,7 @@ export default function AdminDashboard() {
           <div className="mt-3 overflow-x-auto">
             <table className="w-full text-xs">
               <thead><tr className="text-muted-foreground border-b border-border/30">
-                <th className="text-left pb-1.5">City</th><th className="text-center pb-1.5">Users</th><th className="text-center pb-1.5">High Risk %</th><th className="text-right pb-1.5">Avg Score</th>
+                <th className="text-left pb-1.5">State</th><th className="text-center pb-1.5">Users</th><th className="text-center pb-1.5">High Risk %</th><th className="text-right pb-1.5">Avg Score</th>
               </tr></thead>
               <tbody className="divide-y divide-border/20">
                 {cityList.slice(0, 5).map((c: any) => (

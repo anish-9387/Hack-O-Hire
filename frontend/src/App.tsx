@@ -50,11 +50,11 @@ function Router() {
       {/* Admin Routes */}
       <Route path="/admin"><Layout><AdminDashboard /></Layout></Route>
       <Route path="/admin/risk"><Layout><AdminRiskDistribution /></Layout></Route>
+      <Route path="/admin/users/:id"><Layout><AdminUserDetail /></Layout></Route>
       <Route path="/admin/users"><Layout><AdminUsers /></Layout></Route>
       <Route path="/admin/interventions"><Layout><AdminInterventions /></Layout></Route>
       <Route path="/admin/model"><Layout><AdminModelPerformance /></Layout></Route>
       <Route path="/admin/audit"><Layout><AdminAuditLogs /></Layout></Route>
-      <Route path="/admin/users/:id"><Layout><AdminUserDetail /></Layout></Route>
       <Route path="/admin/cross-bank"><Layout><AdminCrossBank /></Layout></Route>
 
       <Route component={NotFound} />

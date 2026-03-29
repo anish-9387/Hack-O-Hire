@@ -10,19 +10,13 @@ import { Badge } from "@/components/ui/badge"
 import { Button } from "@/components/ui/button"
 import { Input } from "@/components/ui/input"
 import { Skeleton } from "@/components/ui/skeleton"
+import { formatINR } from "@/lib/utils"
 import {
   Shield, AlertTriangle, Building2, Search, Database,
-  Users, Zap, ChevronRight, Globe, Lock
+  Users, Zap, Globe, Lock
 } from "lucide-react"
 import { motion } from "framer-motion"
 import { useQueryClient } from "@tanstack/react-query"
-
-function formatINR(n: number) {
-  if (n >= 10000000) return `${(n / 10000000).toFixed(1)}Cr`
-  if (n >= 100000) return `${(n / 100000).toFixed(1)}L`
-  if (n >= 1000) return `${(n / 1000).toFixed(1)}K`
-  return n.toFixed(0)
-}
 
 export default function CrossBankDashboard() {
   const qc = useQueryClient()
@@ -293,16 +287,16 @@ export default function CrossBankDashboard() {
                         <Badge variant="destructive" className="text-[10px]">SERIAL DEFAULTER</Badge>
                       )}
                     </div>
-                    <p className="text-sm text-muted-foreground">
+                    <p className="text-sm text-foreground/70">
                       {alert.cross_bank_defaults} default(s) at {alert.banks_defaulted_at.join(", ")} |
                       Total: {formatINR(alert.total_default_amount)} |
                       Max DPD: {alert.max_dpd_other_banks}
                     </p>
                   </div>
                 </div>
-                <div className="text-right">
-                  <p className="text-sm font-medium">Current: {alert.current_risk_category}</p>
-                  <p className="text-xs text-muted-foreground">{alert.recommended_action}</p>
+                <div className="text-right shrink-0">
+                  <p className="text-sm font-medium text-foreground">Current: {alert.current_risk_category}</p>
+                  <p className="text-xs text-foreground/70">{alert.recommended_action}</p>
                 </div>
               </motion.div>
             ))}
@@ -311,9 +305,9 @@ export default function CrossBankDashboard() {
       </Card>
 
       {/* How It Works */}
-      <Card className="p-6 bg-gradient-to-br from-blue-50 to-indigo-50 dark:from-blue-950 dark:to-indigo-950 border-blue-200 dark:border-blue-800">
-        <h3 className="font-semibold mb-4 flex items-center gap-2">
-          <Lock className="h-5 w-5 text-blue-500" /> How Cross-Bank Detection Works
+      <Card className="p-6 bg-gradient-to-br from-blue-950/80 to-indigo-950/80 border-blue-800 mb-6">
+        <h3 className="font-semibold mb-4 flex items-center gap-2 text-blue-400">
+          <Lock className="h-5 w-5 text-blue-400" /> How Cross-Bank Detection Works
         </h3>
         <div className="grid grid-cols-1 md:grid-cols-4 gap-4">
           {[
@@ -327,8 +321,8 @@ export default function CrossBankDashboard() {
                 {item.step}
               </div>
               <div>
-                <p className="font-medium text-sm">{item.title}</p>
-                <p className="text-xs text-muted-foreground mt-1">{item.desc}</p>
+                <p className="font-medium text-sm text-blue-100">{item.title}</p>
+                <p className="text-xs text-blue-300 mt-1">{item.desc}</p>
               </div>
             </div>
           ))}

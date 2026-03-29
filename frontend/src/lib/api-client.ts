@@ -27,21 +27,79 @@ export interface User {
 export type GetSpendingAnalyticsPeriod = "7d" | "30d" | "90d" | "1y";
 export type GetSpendingAnalyticsParams = { period?: GetSpendingAnalyticsPeriod };
 
+// ── Token refresh logic ───────────────────────────────────────────────
+
+let _refreshPromise: Promise<string> | null = null;
+
+async function _refreshAccessToken(): Promise<string> {
+  const state = useAuthStore.getState();
+  if (!state.refreshToken) throw new Error("No refresh token");
+
+  const res = await fetch("/api/auth/refresh", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ refreshToken: state.refreshToken }),
+  });
+
+  if (!res.ok) {
+    state.logout();
+    window.location.href = "/";
+    throw new Error("Session expired — please log in again");
+  }
+
+  const data = await res.json();
+  state.setToken(data.token, data.expiresIn);
+  return data.token;
+}
+
+async function _ensureValidToken(): Promise<string | null> {
+  const state = useAuthStore.getState();
+  if (!state.token) return null;
+  if (!state.isTokenExpired()) return state.token;
+
+  // Deduplicate concurrent refresh calls
+  if (!_refreshPromise) {
+    _refreshPromise = _refreshAccessToken().finally(() => {
+      _refreshPromise = null;
+    });
+  }
+  return _refreshPromise;
+}
+
 // ── Fetch helper ───────────────────────────────────────────────────────
 
 async function apiFetch<T>(
   path: string,
   options: RequestInit = {}
 ): Promise<T> {
-  const state = useAuthStore.getState();
+  const token = await _ensureValidToken();
   const headers: Record<string, string> = {
     "Content-Type": "application/json",
     ...(options.headers as Record<string, string>),
   };
-  if (state.token) {
-    headers["Authorization"] = `Bearer ${state.token}`;
+  if (token) {
+    headers["Authorization"] = `Bearer ${token}`;
   }
   const res = await fetch(`/api${path}`, { ...options, headers });
+
+  // If 401, try one refresh then retry
+  if (res.status === 401 && useAuthStore.getState().refreshToken) {
+    try {
+      const newToken = await _refreshAccessToken();
+      headers["Authorization"] = `Bearer ${newToken}`;
+      const retry = await fetch(`/api${path}`, { ...options, headers });
+      if (!retry.ok) {
+        const err = await retry.json().catch(() => ({}));
+        throw new Error(err.detail || `HTTP ${retry.status}`);
+      }
+      return retry.json();
+    } catch {
+      useAuthStore.getState().logout();
+      window.location.href = "/";
+      throw new Error("Session expired");
+    }
+  }
+
   if (!res.ok) {
     const err = await res.json().catch(() => ({}));
     throw new Error(err.detail || `HTTP ${res.status}`);
@@ -58,8 +116,17 @@ interface LoginRequest {
 }
 interface LoginResponse {
   token: string;
+  refreshToken: string;
+  expiresIn: number;
   user: User;
   role: string;
+}
+
+interface RegisterRequest {
+  email: string;
+  password: string;
+  name: string;
+  role: LoginRequestRole;
 }
 
 export function useLogin() {
@@ -69,6 +136,23 @@ export function useLogin() {
         method: "POST",
         body: JSON.stringify(data),
       }),
+  });
+}
+
+export function useRegister() {
+  return useMutation<LoginResponse, Error, { data: RegisterRequest }>({
+    mutationFn: ({ data }) =>
+      apiFetch<LoginResponse>("/auth/register", {
+        method: "POST",
+        body: JSON.stringify(data),
+      }),
+  });
+}
+
+export function useLogout() {
+  return useMutation<any, Error, void>({
+    mutationFn: () =>
+      apiFetch<any>("/auth/logout", { method: "POST" }),
   });
 }
 
@@ -262,6 +346,39 @@ export function useListUsers(params?: any) {
       return apiFetch<any>(`/admin/users?${q.toString()}`);
     },
   });
+}
+
+export async function exportExcel(riskLevel?: string): Promise<void> {
+  const token = await _ensureValidToken();
+  const q = new URLSearchParams();
+  if (riskLevel && riskLevel !== "all") q.set("riskLevel", riskLevel);
+  const url = `/api/admin/export-excel?${q.toString()}`;
+
+  const res = await fetch(url, {
+    headers: token ? { Authorization: `Bearer ${token}` } : {},
+  });
+
+  if (!res.ok) {
+    const errBody = await res.text().catch(() => "");
+    const msg = `Export failed (HTTP ${res.status}). ${errBody}`;
+    alert(msg);
+    throw new Error(msg);
+  }
+
+  const blob = await res.blob();
+  if (blob.size === 0) {
+    alert("Export returned an empty file.");
+    throw new Error("Empty export response");
+  }
+  const blobUrl = URL.createObjectURL(blob);
+  const a = document.createElement("a");
+  a.href = blobUrl;
+  a.download = `credit_risk_report_${new Date().toISOString().slice(0, 10)}.xlsx`;
+  document.body.appendChild(a);
+  a.click();
+  a.remove();
+  // Delay revocation so the browser has time to start the download
+  setTimeout(() => URL.revokeObjectURL(blobUrl), 1000);
 }
 
 export function useGetUserProfile(id: string, options?: { enabled?: boolean }) {
