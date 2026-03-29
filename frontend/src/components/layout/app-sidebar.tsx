@@ -62,7 +62,7 @@ export function AppSidebar() {
             <Sparkles className="w-4 h-4 text-primary-foreground" />
           </div>
           <div>
-            <h2 className="font-display font-bold text-lg leading-tight tracking-tight text-foreground">FinHealth</h2>
+            <h2 className="font-display font-bold text-lg leading-tight tracking-tight text-foreground">RiskSense</h2>
             <p className="text-[10px] uppercase tracking-widest text-muted-foreground font-semibold">Intelligence</p>
           </div>
         </div>

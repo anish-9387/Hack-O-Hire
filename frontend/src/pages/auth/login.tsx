@@ -92,7 +92,7 @@ export default function Login() {
               <div className="w-12 h-12 rounded-xl bg-gradient-to-br from-primary to-info flex items-center justify-center shadow-glow">
                 <Sparkles className="w-6 h-6 text-primary-foreground" />
               </div>
-              <h1 className="text-3xl font-display font-bold text-foreground tracking-tight">FinHealth</h1>
+              <h1 className="text-3xl font-display font-bold text-foreground tracking-tight">RiskSense</h1>
             </div>
 
             <h2 className="text-5xl font-display font-bold text-foreground leading-[1.1] tracking-tight mb-6">
@@ -141,7 +141,7 @@ export default function Login() {
             <div className="w-10 h-10 rounded-lg bg-gradient-to-br from-primary to-info flex items-center justify-center">
               <Sparkles className="w-5 h-5 text-primary-foreground" />
             </div>
-            <h1 className="text-2xl font-display font-bold">FinHealth</h1>
+            <h1 className="text-2xl font-display font-bold">RiskSense</h1>
           </div>
 
           <AnimatePresence mode="wait">

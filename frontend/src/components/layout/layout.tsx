@@ -40,7 +40,7 @@ export function Layout({ children }: { children: React.ReactNode }) {
       '/admin/model': 'Model Performance',
       '/admin/audit': 'Audit Logs',
     }
-    return pathMap[location] || 'FinHealth'
+    return pathMap[location] || 'RiskSense'
   }
 
   return (
