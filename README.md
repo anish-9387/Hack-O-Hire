@@ -10,7 +10,6 @@ A full-stack credit risk management platform for the Indian lending market. It s
 | **Backend** | FastAPI, SQLAlchemy, PostgreSQL 16, APScheduler |
 | **ML** | XGBoost, LightGBM, SHAP, Scikit-learn, SMOTEENN |
 | **Auth** | JWT (HS256) + bcrypt |
-| **CI/CD** | GitHub Actions |
 
 ## Features
 
